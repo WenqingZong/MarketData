@@ -13,16 +13,16 @@ fn main() {
         .filter_level(LevelFilter::Debug)
         .init();
     info!("Logging system initialized");
-    let mut data = MarketDataCache::with_file("./market_data.json");
-    dbg!(&data.count());
-    dbg!(&data.buckets.len());
-    let start_time = data.buckets[0].start_time_ns;
-    let end_time = data.buckets.back().unwrap().end_time_ns - 10000;
+    let cache = MarketDataCache::with_file("./market_data.json");
+    dbg!(&cache.count());
+    dbg!(&cache.buckets.len());
+    let start_time = cache.buckets[0].start_time_ns;
+    let end_time = cache.buckets.back().unwrap().end_time_ns - 10000;
 
-    dbg!(&data.spread_percentiles(start_time, end_time));
+    dbg!(&cache.spread_percentiles(start_time, end_time));
 
-    dbg!(data.count());
-    dbg!(data.count_range(start_time, end_time));
-    dbg!(data.max_spread(start_time, end_time));
-    dbg!(data.min_spread(start_time, end_time));
+    dbg!(cache.count());
+    dbg!(cache.count_range(start_time, end_time));
+    dbg!(cache.max_spread(start_time, end_time));
+    dbg!(cache.min_spread(start_time, end_time));
 }

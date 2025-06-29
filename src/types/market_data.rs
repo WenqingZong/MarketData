@@ -191,7 +191,7 @@ impl MarketDataCache {
     // Get the 10th, 50th, and 90th percentiles of the spread in the given time range.
     // Spread is defined as the difference between the lowest ask price and highest bid price.
     // start_time and end_time may be any time within the last 1 hour.
-    pub fn spread_percentiles(&mut self, start_time: u64, end_time: u64) -> (f64, f64, f64) {
+    pub fn spread_percentiles(&self, start_time: u64, end_time: u64) -> (f64, f64, f64) {
         let mut tdigests = vec![];
 
         let cache_start_time_ns = self.buckets[0].start_time_ns;

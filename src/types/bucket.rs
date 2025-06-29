@@ -91,7 +91,7 @@ impl Bucket {
         self.get_end_before(end_time_ns).len()
     }
 
-    pub fn get_tdigest(&mut self) -> TDigest {
+    pub fn get_tdigest(&self) -> TDigest {
         {
             let borrow = self.tdigest.borrow();
             if let Some(ref tdigest) = *borrow {
