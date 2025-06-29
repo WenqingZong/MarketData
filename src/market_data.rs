@@ -45,7 +45,7 @@ impl Bucket {
         }
     }
 
-    pub fn add(&mut self, market_data_entry: MarketDataEntry) {
+    pub fn insert(&mut self, market_data_entry: MarketDataEntry) {
         self.count += 1;
         let spread = market_data_entry.asks[0].price - market_data_entry.bids[0].price;
         self.tdigest.merge_unsorted(vec![spread]);
@@ -101,9 +101,7 @@ impl Bucket {
 #[derive(Debug)]
 pub struct MarketDataCache {
     pub buckets: VecDeque<Bucket>,   // for 100ms buckets
-    // pub coarse: VecDeque<Bucket>, // for 1 min buckets
     pub bucket_ns: u64,
-    // pub coarse_ns: u64,
     pub count: u64,
 }
 
@@ -111,9 +109,7 @@ impl MarketDataCache {
     pub fn new() -> Self {
         Self {
             buckets: VecDeque::with_capacity(36000),
-            // coarse: VecDeque::with_capacity(60),
             bucket_ns: 100_000_000,          // 100ms
-            // coarse_ns: 60 * 1_000_000_000, // 1 minute
             count: 0,
         }
     }
@@ -185,20 +181,44 @@ impl MarketDataCache {
 
         let mut cache = Self::new();
         for entry in market_data_entries {
-            cache.insert(&entry);
+            cache.insert(entry);
         }
         cache
     }
 
     // Insert an entry into the cache.
-    pub fn insert(&mut self, data: &MarketDataEntry) {
-        unimplemented!()
+    pub fn insert(&mut self, data: MarketDataEntry) {
+        if self.count == 0 {
+            // We need to initialize all buckets, because now all bucket start time is 0ns.
+            let remainder = data.utc_epoch_ns % self.bucket_ns;
+            let mut aligned_start_time_ns = data.utc_epoch_ns - remainder;
+            for bucket in &mut self.buckets {
+                bucket.start_time_ns = aligned_start_time_ns;
+                bucket.end_time_ns = aligned_start_time_ns + self.bucket_ns;
+                aligned_start_time_ns += self.bucket_ns;
+            }
+        }
+
+        self.count += 1;
+        let bucket_idx = find_bucket_index(self.buckets[0].start_time_ns, data.utc_epoch_ns, self.bucket_ns).unwrap();
+        if bucket_idx >= self.buckets.len() {
+            let hour_in_ns = 3_600_000_000_000;
+            let threshold = data.utc_epoch_ns - hour_in_ns;
+            self.remove_up_to(threshold);
+        }
+        let bucket_idx = find_bucket_index(self.buckets[0].start_time_ns, data.utc_epoch_ns, self.bucket_ns).unwrap();
+        self.buckets[bucket_idx].insert(data);
     }
 
     // Remove all entries older or the same age as the specified time.
     // This function is only used for some periodic cleanup.
-    pub fn remove_up_to(&mut self, time: i64) {
-        unimplemented!()
+    pub fn remove_up_to(&mut self, time: u64) {
+        let mut bucket_end_time = self.buckets[0].end_time_ns;
+        while bucket_end_time <= time {
+            let popped = self.buckets.pop_front().unwrap();
+            bucket_end_time = popped.end_time_ns;
+        }
+        self.buckets[0].remove_up_to(time);
     }
 
     // Get the total number of entries in the cache.
