@@ -9,7 +9,7 @@ use tdigest::TDigest;
 
 impl MarketDataCache {
     pub fn new(num_buckets: usize, bucket_ns: u64) -> Self {
-        let mut buckets = VecDeque::with_capacity(num_buckets);
+        let buckets = VecDeque::with_capacity(num_buckets);
         Self {
             buckets,
             bucket_ns,
@@ -165,7 +165,7 @@ impl MarketDataCache {
         self.count
     }
 
-    // Get the number of entries in the given time range.
+    // Get the number of entries in the given time range, including both ends.
     // start_time and end_time may be any time within the last 1 hour.
     pub fn count_range(&self, start_time: u64, end_time: u64) -> usize {
         let cache_start_time_ns = self.buckets[0].start_time_ns;
@@ -273,7 +273,7 @@ impl MarketDataCache {
             find_bucket_index(self.buckets[0].start_time_ns, start_time, self.bucket_ns).unwrap();
         let end_idx =
             find_bucket_index(self.buckets[0].start_time_ns, end_time, self.bucket_ns).unwrap();
-        let mut max = f64::MIN;
+        let mut max = -1.0 * f64::MAX;
 
         // Get the entries after start time in start_idx bucket.
         let entries1: Vec<f64> = self.buckets[start_idx]
@@ -340,8 +340,66 @@ mod tests {
             cache.insert(entry);
         }
         assert_eq!(cache.count(), 7);
-        dbg!(&cache);
         cache.remove_up_to(60);
         assert_eq!(cache.count(), 3);
+    }
+
+    #[test]
+    fn test_count_range() {
+        let mut cache = MarketDataCache::new(4, 10);
+        let entries: Vec<MarketDataEntry> = (0..16).map(|i| MarketDataEntry {
+            utc_epoch_ns: i * 5,
+            spread: i as f64,
+        }).collect();
+        for entry in entries {
+            cache.insert(entry);
+        }
+        let count = cache.count_range(45, 60);
+        assert_eq!(count, 4);
+    }
+
+    #[test]
+    fn test_min_spread() {
+        let mut cache = MarketDataCache::new(10, 10);
+        let entries: Vec<MarketDataEntry> = (0..100).map(|i| MarketDataEntry {
+            utc_epoch_ns: i,
+            spread: i as f64,
+        }).collect();
+        for entry in entries {
+            cache.insert(entry);
+        }
+        let min_spread = cache.min_spread(30, 70);
+        assert_eq!(min_spread, 30.0);
+    }
+
+    #[test]
+    fn test_max_spread() {
+        let mut cache = MarketDataCache::new(10, 10);
+        let entries: Vec<MarketDataEntry> = (0..100).map(|i| MarketDataEntry {
+            utc_epoch_ns: i,
+            spread: i as f64,
+        }).collect();
+        for entry in entries {
+            cache.insert(entry);
+        }
+        let max_spread = cache.max_spread(30, 70);
+        assert_eq!(max_spread, 70.0);
+    }
+
+    #[test]
+    fn test_spread_percentiles() {
+        let mut cache = MarketDataCache::new(10, 10);
+        let entries: Vec<MarketDataEntry> = (0..100).map(|i| MarketDataEntry {
+            utc_epoch_ns: i,
+            spread: i as f64,
+        }).collect();
+        for entry in entries {
+            cache.insert(entry);
+        }
+        let (a, b, c) = cache.spread_percentiles(0, 99);
+
+        assert_eq!(a, 9.5);
+        assert_eq!(b, 49.5);
+        assert_eq!(c, 89.5);
     }
 }

@@ -94,7 +94,6 @@ impl Bucket {
         // Lazy calculation here, because adding each spread iteratively is time consuming, so best to do batch processing.
         let mut tdigest = TDigest::new_with_size(self.entries.len());
         let spreads = self.entries.iter().map(|entry| entry.spread).collect();
-        dbg!(&spreads);
         tdigest = tdigest.merge_unsorted(spreads);
         self.tdigest = Some(tdigest.clone());
         tdigest
