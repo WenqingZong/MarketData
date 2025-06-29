@@ -17,11 +17,6 @@ fn main() {
     let start_time = 1731496040100000000;
     let end_time = 1731496040200000000 - 1000;
     dbg!(&data.spread_percentiles(start_time, end_time));
-    // for i in 0..data.buckets.len() {
-    //     if data.buckets[i].count > 0 {
-    //         dbg!(i, &data.buckets[i]);
-    //     }
-    // }
 
     dbg!(data.count());
     dbg!(data.count_range(start_time, end_time));

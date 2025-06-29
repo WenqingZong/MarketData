@@ -1,4 +1,4 @@
-use crate::utils::{calcualte_ave_price, f64_max, f64_min, find_bucket_index, parse_bid_ask_array};
+use crate::utils::{calculate_ave_price, f64_max, f64_min, find_bucket_index, parse_bid_ask_array};
 use log::{debug, info, warn};
 use serde::Deserialize;
 use serde_json::Value;
@@ -7,7 +7,7 @@ use std::fs::File;
 use std::io::BufReader;
 use tdigest::TDigest;
 
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
 pub struct BidAsk {
     pub price: f64,
     pub amount: f64,
@@ -194,8 +194,9 @@ impl MarketDataCache {
                 continue;
             }
             let spread = asks[0].price - bids[0].price;
-            let ave_bid = calcualte_ave_price(&bids);
-            let ave_ask = calcualte_ave_price(&asks);
+            // Safe unwrap here, because we already checked 0.
+            let ave_bid = calculate_ave_price(&bids).unwrap();
+            let ave_ask = calculate_ave_price(&asks).unwrap();
             if spread.abs() >= ave_ask * 0.03 || spread.abs() > ave_bid * 0.03 {
                 warn!(
                     "Skipping entry {} due to outlier, spread is {} but ave bid is {} and ave ask is {}",
