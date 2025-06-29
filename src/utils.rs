@@ -74,7 +74,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn check_parse_bid_ask_array() {
+    fn test_parse_bid_ask_array() {
         let input_str = r#"
         [
             { "price": 1.0, "amount": 2.0 },
@@ -99,7 +99,7 @@ mod tests {
     }
 
     #[test]
-    fn check_find_bucket_index() {
+    fn test_find_bucket_index() {
         let first_bucket_start_ns = 10;
         let bucket_duration_ns = 10;
         let inputs = vec![0_u64, 5, 10, 15, 20, 25, 30];
@@ -111,7 +111,7 @@ mod tests {
     }
 
     #[test]
-    fn check_calculate_ave_price() {
+    fn test_calculate_ave_price() {
         let input: Vec<BidAsk> = (1..=10).map(|price| BidAsk {price: price as f64, amount: 1.0}).collect();
         let output = calculate_ave_price(&input);
         assert_eq!(output, Some(5.5));
@@ -119,7 +119,7 @@ mod tests {
     }
 
     #[test]
-    fn check_f64_max() {
+    fn test_f64_max() {
         let input = vec![1.0, 2.0, 3.0];
         let max = f64_max(&input);
         assert_eq!(max, Some(&3.0));
@@ -130,7 +130,7 @@ mod tests {
     }
 
         #[test]
-    fn check_f64_min() {
+    fn test_f64_min() {
         let input = vec![1.0, 2.0, 3.0];
         let min = f64_min(&input);
         assert_eq!(min, Some(&1.0));
