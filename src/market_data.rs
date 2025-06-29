@@ -1,35 +1,11 @@
 use crate::utils::{calculate_ave_price, f64_max, f64_min, find_bucket_index, parse_bid_ask_array};
-use log::{debug, info, warn};
-use serde::Deserialize;
+use crate::types::{Bucket, MarketDataCache, MarketDataEntry};
+use log::{info, warn};
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::BufReader;
 use tdigest::TDigest;
-
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
-pub struct BidAsk {
-    pub price: f64,
-    pub amount: f64,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct MarketDataEntry {
-    pub utc_epoch_ns: u64,
-    pub spread: f64,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct Bucket {
-    pub start_time_ns: u64,
-    pub end_time_ns: u64,
-    pub count: usize,
-    pub tdigest: Option<TDigest>,
-    pub min_spread: f64,
-    pub max_spread: f64,
-    // TODO: change to reference? Or just store spread?
-    pub entries: Vec<MarketDataEntry>,
-}
 
 impl Bucket {
     pub fn new(start_time_ns: u64, end_time_ns: u64) -> Self {
@@ -117,13 +93,6 @@ impl Bucket {
         self.tdigest = Some(tdigest.clone());
         tdigest
     }
-}
-
-#[derive(Debug)]
-pub struct MarketDataCache {
-    pub buckets: VecDeque<Bucket>, // for 100ms buckets
-    pub bucket_ns: u64,
-    pub count: u64,
 }
 
 impl MarketDataCache {

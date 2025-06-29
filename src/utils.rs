@@ -1,7 +1,11 @@
-// use rust_decimal::Decimal;
-use crate::market_data::BidAsk;
+// System libraries.
 use log::warn;
+
+// Third party libraries.
 use serde_json::Value;
+
+// Project libraries.
+use crate::types::{BidAsk};
 
 pub fn parse_bid_ask_array(arr: &[Value]) -> Vec<BidAsk> {
     let mut result = Vec::new();

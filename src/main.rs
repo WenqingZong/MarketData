@@ -1,14 +1,20 @@
 mod market_data;
 mod utils;
+mod types;
+
+// System libraries.
 use env_logger;
-use log::{LevelFilter, info, warn};
+use log::{LevelFilter, info};
+
+// Project libraries.
+use crate::types::MarketDataCache;
 
 fn main() {
     env_logger::builder()
         .filter_level(LevelFilter::Debug)
         .init();
     info!("Logging system initialized");
-    let mut data = market_data::MarketDataCache::with_file("./market_data.json");
+    let mut data = MarketDataCache::with_file("./market_data.json");
     dbg!(&data.count());
     dbg!(&data.buckets.len());
     // let start_time = data.buckets[0].start_time_ns;
