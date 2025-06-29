@@ -1,11 +1,18 @@
-use crate::types::{Bucket, MarketDataCache, MarketDataEntry};
-use crate::utils::{calculate_ave_price, f64_max, f64_min, find_bucket_index, parse_bid_ask_array};
+// System libraries.
 use log::{info, warn};
-use serde_json::Value;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::BufReader;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+// Third party libraries.
+use serde_json::Value;
 use tdigest::TDigest;
+
+// Project libraries.
+use crate::types::{Bucket, MarketDataCache, MarketDataEntry};
+use crate::utils::{calculate_ave_price, f64_max, f64_min, find_bucket_index, parse_bid_ask_array};
+
 
 impl MarketDataCache {
     pub fn new(num_buckets: usize, bucket_ns: u64) -> Self {
@@ -14,7 +21,7 @@ impl MarketDataCache {
             buckets,
             bucket_ns,
             num_buckets,
-            count: 0,
+            count: AtomicUsize::new(0),
         }
     }
 
@@ -118,7 +125,7 @@ impl MarketDataCache {
             }
         }
 
-        self.count += 1;
+        self.count.fetch_add(1, Ordering::SeqCst);
         let bucket_idx = find_bucket_index(
             self.buckets[0].start_time_ns,
             data.utc_epoch_ns,
@@ -145,15 +152,15 @@ impl MarketDataCache {
     // This function is only used for some periodic cleanup.
     // Returns the number of entries deleted.
     pub fn remove_up_to(&mut self, time: u64) -> usize {
-        let original_count = self.count;
+        let original_count = self.count.load(Ordering::SeqCst);
         let mut bucket_end_time = self.buckets[0].end_time_ns;
         while bucket_end_time <= time {
             let popped = self.buckets.pop_front().unwrap();
             bucket_end_time = self.buckets.front().unwrap().end_time_ns;
-            self.count -= popped.count;
+            self.count.fetch_sub(popped.count, Ordering::SeqCst);
         }
         let deleted = self.buckets[0].remove_up_to(time);
-        self.count -= deleted;
+        self.count.fetch_sub(deleted, Ordering::SeqCst);
 
         // Insert new buckets.
         while self.buckets.len() < self.num_buckets {
@@ -161,12 +168,12 @@ impl MarketDataCache {
             self.buckets
                 .push_back(Bucket::new(start, start + self.bucket_ns));
         }
-        original_count - self.count
+        original_count - self.count.load(Ordering::SeqCst)
     }
 
     // Get the total number of entries in the cache.
     pub fn count(&self) -> usize {
-        self.count
+        self.count.load(Ordering::SeqCst)
     }
 
     // Get the number of entries in the given time range, including both ends.

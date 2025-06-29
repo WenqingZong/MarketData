@@ -92,18 +92,15 @@ impl Bucket {
     }
 
     pub fn get_tdigest(&self) -> TDigest {
-        {
-            let borrow = self.tdigest.borrow();
-            if let Some(ref tdigest) = *borrow {
-                return tdigest.clone();
-            }
+        let mut tdigest_opt = self.tdigest.borrow_mut();
+        if let Some(tdigest) = &*tdigest_opt {
+            return tdigest.clone();
         }
 
-        let mut tdigest = TDigest::new_with_size(self.entries.len());
-        let spreads: Vec<f64> = self.entries.iter().map(|entry| entry.spread).collect();
-        tdigest = tdigest.merge_unsorted(spreads);
-        *self.tdigest.borrow_mut() = Some(tdigest.clone());
-        tdigest
+        let spreads = self.entries.iter().map(|e| e.spread).collect();
+        let new_tdigest = TDigest::new_with_size(100).merge_unsorted(spreads);
+        *tdigest_opt = Some(new_tdigest.clone());
+        new_tdigest
     }
 }
 
