@@ -24,7 +24,7 @@ pub struct Bucket {
     pub start_time_ns: u64,
     pub end_time_ns: u64,
     pub count: usize,
-    pub tdigest: TDigest,
+    pub tdigest: Option<TDigest>,
     pub min_spread: f64,
     pub max_spread: f64,
     // TODO: change to reference? Or just store spread?
@@ -37,7 +37,7 @@ impl Bucket {
             start_time_ns,
             end_time_ns,
             count: 0,
-            tdigest: TDigest::default(),
+            tdigest: None,
             min_spread: f64::MAX,
             max_spread: f64::MIN,
             entries: Vec::new(),
@@ -45,9 +45,10 @@ impl Bucket {
     }
 
     pub fn insert(&mut self, market_data_entry: MarketDataEntry) {
+        // We'll use lazy calculation here.
+        self.tdigest = None;
         self.count += 1;
         let spread = market_data_entry.spread;
-        self.tdigest.merge_unsorted(vec![spread]);
         self.min_spread = self.min_spread.min(spread);
         self.max_spread = self.max_spread.max(spread);
         self.entries.push(market_data_entry);
@@ -70,8 +71,7 @@ impl Bucket {
 
         self.min_spread = *f64_min(&spreads).unwrap();
         self.max_spread = *f64_max(&spreads).unwrap(); // self.max_spread = self.entries.iter().max();
-        self.tdigest = TDigest::default();
-        self.tdigest.merge_unsorted(spreads);
+        self.tdigest = None;
     }
 
     pub fn get_start_from(&self, start_time_ns: u64) -> Vec<&MarketDataEntry> {
@@ -102,6 +102,20 @@ impl Bucket {
 
     pub fn count_end_before(&self, end_time_ns: u64) -> usize {
         self.get_end_before(end_time_ns).len()
+    }
+
+    pub fn get_tdigest(&mut self) -> TDigest {
+        if let Some(ref tdigest) = self.tdigest {
+            return tdigest.clone();
+        }
+
+        // Lazy calculation here, because adding each spread iteratively is time consuming, so best to do batch processing.
+        dbg!();
+        let tdigest = TDigest::new_with_size(self.entries.len());
+        let spreads = self.entries.iter().map(|entry| entry.spread).collect();
+        tdigest.merge_unsorted(spreads);
+        self.tdigest = Some(tdigest.clone());
+        tdigest
     }
 }
 
@@ -278,15 +292,52 @@ impl MarketDataCache {
         for i in start_idx + 1..end_idx {
             cnt += self.buckets[i].count;
         }
-        cnt += self.buckets[end_idx].count_end_before(end_time);
+        if end_idx != start_idx {
+            cnt += self.buckets[end_idx].count_end_before(end_time);
+        }
         cnt
     }
 
     // Get the 10th, 50th, and 90th percentiles of the spread in the given time range.
     // Spread is defined as the difference between the lowest ask price and highest bid price.
     // start_time and end_time may be any time within the last 1 hour.
-    pub fn spread_percentiles(&self, start_time: i64, end_time: i64) -> (f64, f64, f64) {
-        unimplemented!()
+    pub fn spread_percentiles(&mut self, start_time: u64, end_time: u64) -> (f64, f64, f64) {
+        let mut tdigests = vec![];
+
+        let cache_start_time_ns = self.buckets[0].start_time_ns;
+        let start_idx = find_bucket_index(cache_start_time_ns, start_time, self.bucket_ns).unwrap();
+        let end_idx = find_bucket_index(cache_start_time_ns, end_time, self.bucket_ns).unwrap();
+
+        let entries1: Vec<f64> = self.buckets[start_idx]
+            .get_start_from(start_time)
+            .iter()
+            .map(|entry| entry.spread)
+            .collect();
+        let mut tdigest1 = TDigest::new_with_size(1000);
+        tdigest1 = tdigest1.merge_unsorted(entries1);
+        tdigests.push(tdigest1);
+
+        for i in start_idx + 1..end_idx {
+            tdigests.push(self.buckets[i].get_tdigest());
+        }
+
+        if start_idx != end_idx {
+            let entries2: Vec<f64> = self.buckets[end_idx]
+                .get_end_before(end_time)
+                .iter()
+                .map(|entry| entry.spread)
+                .collect();
+            let mut tdigest2 = TDigest::new_with_size(1000);
+            tdigest2 = tdigest2.merge_unsorted(entries2);
+            tdigests.push(tdigest2);
+        }
+
+        let tdigest = TDigest::merge_digests(tdigests);
+        (
+            tdigest.estimate_quantile(0.1),
+            tdigest.estimate_quantile(0.5),
+            tdigest.estimate_quantile(0.9),
+        )
     }
 
     // Get the minimum spread in the given time range.
@@ -309,19 +360,21 @@ impl MarketDataCache {
             min = min.min(min1);
         }
 
-        // Get the entries before end time in end_idx bucket.
-        let entries2: Vec<f64> = self.buckets[end_idx]
-            .get_end_before(end_time)
-            .iter()
-            .map(|entry| entry.spread)
-            .collect();
-        if entries2.len() > 0 {
-            let min2 = *f64_min(&entries2).unwrap();
-            min = min.min(min2);
-        }
-
         for i in start_idx + 1..end_idx {
             min = min.min(self.buckets[i].min_spread);
+        }
+
+        // Get the entries before end time in end_idx bucket.
+        if start_idx != end_idx {
+            let entries2: Vec<f64> = self.buckets[end_idx]
+                .get_end_before(end_time)
+                .iter()
+                .map(|entry| entry.spread)
+                .collect();
+            if entries2.len() > 0 {
+                let min2 = *f64_min(&entries2).unwrap();
+                min = min.min(min2);
+            }
         }
 
         min
@@ -347,19 +400,21 @@ impl MarketDataCache {
             max = max.max(max1);
         }
 
-        // Get the entries before end time in end_idx bucket.
-        let entries2: Vec<f64> = self.buckets[end_idx]
-            .get_end_before(end_time)
-            .iter()
-            .map(|entry| entry.spread)
-            .collect();
-        if entries2.len() > 0 {
-            let max2 = *f64_max(&entries2).unwrap();
-            max = max.max(max2);
-        }
-
         for i in start_idx + 1..end_idx {
             max = max.max(self.buckets[i].min_spread);
+        }
+
+        // Get the entries before end time in end_idx bucket.
+        if start_idx != end_idx {
+            let entries2: Vec<f64> = self.buckets[end_idx]
+                .get_end_before(end_time)
+                .iter()
+                .map(|entry| entry.spread)
+                .collect();
+            if entries2.len() > 0 {
+                let max2 = *f64_max(&entries2).unwrap();
+                max = max.max(max2);
+            }
         }
 
         max
