@@ -2,7 +2,6 @@ mod types;
 mod utils;
 
 // System libraries.
-use env_logger;
 use log::{LevelFilter, info};
 
 // Project libraries.

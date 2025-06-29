@@ -12,7 +12,7 @@ use tdigest::TDigest;
 
 // Project libraries.
 use crate::types::{Bucket, MarketDataCache, MarketDataEntry};
-use crate::utils::{calculate_ave_price, f64_max, f64_min, find_bucket_index, parse_bid_ask_array};
+use crate::utils::{calculate_ave_price, find_bucket_index, parse_bid_ask_array};
 
 impl MarketDataCache {
     pub fn new(num_buckets: usize, bucket_ns: u64) -> Self {
@@ -27,7 +27,7 @@ impl MarketDataCache {
 
     // Pre-populate with data for testing.
     pub fn with_file(file_path: &str) -> Self {
-        info!("Reading json file {}", file_path);
+        info!("Reading json file {file_path}");
         let file = File::open(file_path).unwrap();
         let reader = BufReader::new(file);
 
@@ -40,19 +40,19 @@ impl MarketDataCache {
             // Handle timestamp.
             let utc_epoch_ns = match entry.get("utc_epoch_ns") {
                 Some(Value::Number(n)) if n.as_i64().unwrap() <= 0 => {
-                    warn!("Skipping entry {} due to invalid timestamp {}", i, n);
+                    warn!("Skipping entry {i} due to invalid timestamp {n}");
                     continue;
                 }
                 Some(Value::Number(n)) => {
                     if let Some(ts) = n.as_u64() {
                         ts
                     } else {
-                        warn!("Skipping entry {} due to non-u64 timestamp {}", i, n);
+                        warn!("Skipping entry {i} due to non-u64 timestamp {n}");
                         continue;
                     }
                 }
                 _ => {
-                    warn!("Skipping entry {} due to missing timestamp in json", i);
+                    warn!("Skipping entry {i} due to missing timestamp in json");
                     continue;
                 }
             };
@@ -62,7 +62,7 @@ impl MarketDataCache {
             let bids = match entry.get("bids") {
                 Some(Value::Array(arr)) => parse_bid_ask_array(arr),
                 _ => {
-                    warn!("Skipping entry {} due to missing bids array in json", i);
+                    warn!("Skipping entry {i} due to missing bids array in json");
                     continue;
                 }
             };
@@ -72,13 +72,13 @@ impl MarketDataCache {
             let asks = match entry.get("asks") {
                 Some(Value::Array(arr)) => parse_bid_ask_array(arr),
                 _ => {
-                    warn!("Skipping entry {} due to missing asks array in json", i);
+                    warn!("Skipping entry {i} due to missing asks array in json");
                     continue;
                 }
             };
 
-            if bids.len() == 0 || asks.len() == 0 {
-                warn!("Skipping entry {} due to empty bids or asks array", i);
+            if bids.is_empty() || asks.is_empty() {
+                warn!("Skipping entry {i} due to empty bids or asks array");
                 continue;
             }
             let spread = asks[0].price - bids[0].price;
@@ -87,8 +87,7 @@ impl MarketDataCache {
             let ave_ask = calculate_ave_price(&asks).unwrap();
             if spread.abs() >= ave_ask * 0.03 || spread.abs() > ave_bid * 0.03 {
                 warn!(
-                    "Skipping entry {} due to outlier, spread is {} but ave bid is {} and ave ask is {}",
-                    i, spread, ave_bid, ave_ask
+                    "Skipping entry {i} due to outlier, spread is {spread} but ave bid is {ave_bid} and ave ask is {ave_ask}"
                 );
                 continue;
             }
@@ -113,7 +112,7 @@ impl MarketDataCache {
 
     // Insert an entry into the cache.
     pub fn insert(&mut self, data: MarketDataEntry) {
-        if self.buckets.len() == 0 {
+        if self.buckets.is_empty() {
             // We need to initialize all buckets.
             let remainder = data.utc_epoch_ns % self.bucket_ns;
             let aligned_start_time_ns = data.utc_epoch_ns - remainder;
@@ -348,7 +347,7 @@ impl MarketDataCache {
 
         let start_idx = find_bucket_index(cache_start_time_ns, start_time, self.bucket_ns).unwrap();
         let end_idx = find_bucket_index(cache_start_time_ns, end_time, self.bucket_ns).unwrap();
-        let mut max = -1.0 * f64::MAX;
+        let mut max = -f64::MAX;
 
         // Handle the starting bucket, partial data.
         {

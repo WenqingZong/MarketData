@@ -20,8 +20,8 @@ pub fn parse_bid_ask_array(arr: &[Value]) -> Vec<BidAsk> {
         };
 
         // Check if BOTH price and amount exist and are not null.
-        let is_valid = obj.get("price").map_or(false, |v| !v.is_null())
-            && obj.get("amount").map_or(false, |v| !v.is_null());
+        let is_valid = obj.get("price").is_some_and(|v| !v.is_null())
+            && obj.get("amount").is_some_and(|v| !v.is_null());
 
         if !is_valid {
             warn!("Skipping bid/ask entry due to missing or null for price/amount");
@@ -31,7 +31,7 @@ pub fn parse_bid_ask_array(arr: &[Value]) -> Vec<BidAsk> {
         // The actual deserialize.
         match serde_json::from_value::<BidAsk>(item.clone()) {
             Ok(bid_ask) => result.push(bid_ask),
-            Err(e) => warn!("Skipping bid/ask entry due to deserialization error: {}", e),
+            Err(e) => warn!("Skipping bid/ask entry due to deserialization error: {e}"),
         }
     }
     result
@@ -52,7 +52,7 @@ pub fn find_bucket_index(
     Some(index)
 }
 
-pub fn calculate_ave_price(bidask: &Vec<BidAsk>) -> Option<f64> {
+pub fn calculate_ave_price(bidask: &[BidAsk]) -> Option<f64> {
     let num = bidask.len();
     if num == 0 {
         return None;
@@ -61,11 +61,11 @@ pub fn calculate_ave_price(bidask: &Vec<BidAsk>) -> Option<f64> {
     Some(sum / num as f64)
 }
 
-pub fn f64_min(array: &Vec<f64>) -> Option<&f64> {
+pub fn f64_min(array: &[f64]) -> Option<&f64> {
     array.iter().min_by(|a, b| a.partial_cmp(b).unwrap())
 }
 
-pub fn f64_max(array: &Vec<f64>) -> Option<&f64> {
+pub fn f64_max(array: &[f64]) -> Option<&f64> {
     array.iter().max_by(|a, b| a.partial_cmp(b).unwrap())
 }
 

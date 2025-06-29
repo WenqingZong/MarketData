@@ -8,6 +8,10 @@ use tdigest::TDigest;
 use crate::types::{Bucket, MarketDataEntry};
 use crate::utils::{f64_max, f64_min};
 
+// Should be safe, as we have a RwLock outside of each Bucket.
+unsafe impl Send for Bucket {}
+unsafe impl Sync for Bucket {}
+
 impl Bucket {
     pub fn new(start_time_ns: u64, end_time_ns: u64) -> Self {
         Self {
@@ -16,7 +20,7 @@ impl Bucket {
             count: 0,
             tdigest: RefCell::new(None),
             min_spread: f64::MAX,
-            max_spread: -1.0 * f64::MAX,
+            max_spread: -f64::MAX,
             entries: Vec::new(),
         }
     }
