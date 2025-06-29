@@ -2,6 +2,7 @@ pub mod bucket;
 pub mod market_data;
 
 // System libraries.
+use std::cell::RefCell;
 use std::collections::VecDeque;
 
 // Third party libraries.
@@ -25,7 +26,7 @@ pub struct Bucket {
     pub start_time_ns: u64,
     pub end_time_ns: u64,
     pub count: usize,
-    pub tdigest: Option<TDigest>,
+    pub tdigest: RefCell<Option<TDigest>>,
     pub min_spread: f64,
     pub max_spread: f64,
     pub entries: Vec<MarketDataEntry>,

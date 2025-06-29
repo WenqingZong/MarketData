@@ -1,5 +1,5 @@
-use crate::utils::{calculate_ave_price, f64_max, f64_min, find_bucket_index, parse_bid_ask_array};
 use crate::types::{Bucket, MarketDataCache, MarketDataEntry};
+use crate::utils::{calculate_ave_price, f64_max, f64_min, find_bucket_index, parse_bid_ask_array};
 use log::{info, warn};
 use serde_json::Value;
 use std::collections::VecDeque;
@@ -111,7 +111,10 @@ impl MarketDataCache {
             let remainder = data.utc_epoch_ns % self.bucket_ns;
             let aligned_start_time_ns = data.utc_epoch_ns - remainder;
             for i in 0..self.num_buckets {
-                self.buckets.push_back(Bucket::new(aligned_start_time_ns + self.bucket_ns * i as u64, aligned_start_time_ns + self.bucket_ns * (i + 1) as u64));
+                self.buckets.push_back(Bucket::new(
+                    aligned_start_time_ns + self.bucket_ns * i as u64,
+                    aligned_start_time_ns + self.bucket_ns * (i + 1) as u64,
+                ));
             }
         }
 
@@ -125,7 +128,8 @@ impl MarketDataCache {
         if bucket_idx >= self.buckets.len() {
             let total_cache_time_in_ns = self.num_buckets as u64 * self.bucket_ns;
             let cache_start_time_ns = self.buckets[0].start_time_ns;
-            let threshold = cache_start_time_ns + self.bucket_ns * (bucket_idx + 1) as u64 - total_cache_time_in_ns;
+            let threshold = cache_start_time_ns + self.bucket_ns * (bucket_idx + 1) as u64
+                - total_cache_time_in_ns;
             self.remove_up_to(threshold);
         }
         let bucket_idx = find_bucket_index(
@@ -316,7 +320,7 @@ mod tests {
         let mut cache = MarketDataCache::new(10, 10);
         let entry = MarketDataEntry {
             utc_epoch_ns: 0,
-            spread: 1.0
+            spread: 1.0,
         };
 
         cache.insert(entry);
@@ -332,10 +336,12 @@ mod tests {
     #[test]
     fn test_remove_up_to() {
         let mut cache = MarketDataCache::new(4, 10);
-        let entries: Vec<MarketDataEntry> = (0..16).map(|i| MarketDataEntry {
-            utc_epoch_ns: i * 5,
-            spread: i as f64,
-        }).collect();
+        let entries: Vec<MarketDataEntry> = (0..16)
+            .map(|i| MarketDataEntry {
+                utc_epoch_ns: i * 5,
+                spread: i as f64,
+            })
+            .collect();
         for entry in entries {
             cache.insert(entry);
         }
@@ -347,10 +353,12 @@ mod tests {
     #[test]
     fn test_count_range() {
         let mut cache = MarketDataCache::new(4, 10);
-        let entries: Vec<MarketDataEntry> = (0..16).map(|i| MarketDataEntry {
-            utc_epoch_ns: i * 5,
-            spread: i as f64,
-        }).collect();
+        let entries: Vec<MarketDataEntry> = (0..16)
+            .map(|i| MarketDataEntry {
+                utc_epoch_ns: i * 5,
+                spread: i as f64,
+            })
+            .collect();
         for entry in entries {
             cache.insert(entry);
         }
@@ -361,10 +369,12 @@ mod tests {
     #[test]
     fn test_min_spread() {
         let mut cache = MarketDataCache::new(10, 10);
-        let entries: Vec<MarketDataEntry> = (0..100).map(|i| MarketDataEntry {
-            utc_epoch_ns: i,
-            spread: i as f64,
-        }).collect();
+        let entries: Vec<MarketDataEntry> = (0..100)
+            .map(|i| MarketDataEntry {
+                utc_epoch_ns: i,
+                spread: i as f64,
+            })
+            .collect();
         for entry in entries {
             cache.insert(entry);
         }
@@ -375,10 +385,12 @@ mod tests {
     #[test]
     fn test_max_spread() {
         let mut cache = MarketDataCache::new(10, 10);
-        let entries: Vec<MarketDataEntry> = (0..100).map(|i| MarketDataEntry {
-            utc_epoch_ns: i,
-            spread: i as f64,
-        }).collect();
+        let entries: Vec<MarketDataEntry> = (0..100)
+            .map(|i| MarketDataEntry {
+                utc_epoch_ns: i,
+                spread: i as f64,
+            })
+            .collect();
         for entry in entries {
             cache.insert(entry);
         }
@@ -389,10 +401,12 @@ mod tests {
     #[test]
     fn test_spread_percentiles() {
         let mut cache = MarketDataCache::new(10, 10);
-        let entries: Vec<MarketDataEntry> = (0..100).map(|i| MarketDataEntry {
-            utc_epoch_ns: i,
-            spread: i as f64,
-        }).collect();
+        let entries: Vec<MarketDataEntry> = (0..100)
+            .map(|i| MarketDataEntry {
+                utc_epoch_ns: i,
+                spread: i as f64,
+            })
+            .collect();
         for entry in entries {
             cache.insert(entry);
         }
