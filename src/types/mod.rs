@@ -35,5 +35,6 @@ pub struct Bucket {
 pub struct MarketDataCache {
     pub buckets: VecDeque<Bucket>, // for 100ms buckets
     pub bucket_ns: u64,
-    pub count: u64,
+    pub num_buckets: usize,
+    pub count: usize,
 }

@@ -13,7 +13,7 @@ impl Bucket {
             count: 0,
             tdigest: None,
             min_spread: f64::MAX,
-            max_spread: f64::MIN,
+            max_spread: -1.0 * f64::MAX,
             entries: Vec::new(),
         }
     }
@@ -33,10 +33,12 @@ impl Bucket {
         true
     }
 
-    pub fn remove_up_to(&mut self, time: u64) {
+    pub fn remove_up_to(&mut self, time: u64) -> usize {
         if time < self.start_time_ns || time > self.end_time_ns {
-            return;
+            return 0;
         }
+
+        let original_count = self.count;
         self.entries.retain(|entry| entry.utc_epoch_ns > time);
 
         // Update counter, min and max.
@@ -51,6 +53,7 @@ impl Bucket {
         self.min_spread = *f64_min(&spreads).unwrap();
         self.max_spread = *f64_max(&spreads).unwrap(); // self.max_spread = self.entries.iter().max();
         self.tdigest = None;
+        original_count - self.count
     }
 
     pub fn get_start_from(&self, start_time_ns: u64) -> Vec<&MarketDataEntry> {
@@ -118,6 +121,8 @@ mod tests {
         assert_eq!(bucket.start_time_ns, 10);
         assert_eq!(bucket.end_time_ns, 100);
         assert!(bucket.tdigest.is_none());
+        assert_eq!(bucket.min_spread, f64::MAX);
+        assert_eq!(bucket.max_spread, -1.0 * f64::MAX);
     }
 
     #[test]
@@ -153,13 +158,16 @@ mod tests {
         }
         assert_eq!(bucket.count, 15);
 
-        bucket.remove_up_to(30);
+        let deleted = bucket.remove_up_to(30);
         assert_eq!(bucket.count, 15);
+        assert_eq!(deleted, 0);
 
-        bucket.remove_up_to(3);
+        let deleted = bucket.remove_up_to(3);
         assert_eq!(bucket.count, 15);
+        assert_eq!(deleted, 0);
 
-        bucket.remove_up_to(10);
+        let deleted = bucket.remove_up_to(10);
+        assert_eq!(deleted, 6);
         assert_eq!(bucket.count, 9);
         assert_eq!(bucket.max_spread, 19.0);
         assert_eq!(bucket.min_spread, 11.0);
