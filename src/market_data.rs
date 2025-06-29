@@ -1,75 +1,119 @@
+use crate::utils::{find_bucket_index, parse_bid_ask_array};
 use log::{debug, info, warn};
-use rust_decimal::prelude::ToPrimitive;
-use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde_json::Value;
-use tdigest::TDigest;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::BufReader;
-use crate::utils::{decimal_from_json, parse_bid_ask_array};
+use tdigest::TDigest;
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize)]
 pub struct BidAsk {
-    #[serde(deserialize_with = "decimal_from_json")]
-    pub price: Decimal,
-
-    #[serde(deserialize_with = "decimal_from_json")]
-    pub amount: Decimal,
+    pub price: f64,
+    pub amount: f64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct MarketDataEntry {
     pub utc_epoch_ns: u64,
     pub bids: Vec<BidAsk>,
     pub asks: Vec<BidAsk>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Bucket {
     pub start_time_ns: u64,
-    pub count: u64,
+    pub end_time_ns: u64,
+    pub count: usize,
     pub tdigest: TDigest,
-    pub min_spread: Decimal, 
-    pub max_spread: Decimal,
+    pub min_spread: f64,
+    pub max_spread: f64,
+    // TODO: change to reference?
+    pub entries: Vec<MarketDataEntry>,
 }
 
 impl Bucket {
-    pub fn new(start_time_ns: u64) -> Self {
+    pub fn new(start_time_ns: u64, end_time_ns: u64) -> Self {
         Self {
             start_time_ns,
+            end_time_ns,
             count: 0,
             tdigest: TDigest::default(),
-            min_spread: Decimal::MAX,
-            max_spread: Decimal::MIN,
+            min_spread: f64::MAX,
+            max_spread: f64::MIN,
+            entries: Vec::new(),
         }
     }
 
-    pub fn add(&mut self, market_data_entry: &MarketDataEntry) {
+    pub fn add(&mut self, market_data_entry: MarketDataEntry) {
         self.count += 1;
         let spread = market_data_entry.asks[0].price - market_data_entry.bids[0].price;
-        self.tdigest.merge_unsorted(vec![spread.to_f64().unwrap()]);
+        self.tdigest.merge_unsorted(vec![spread]);
         self.min_spread = self.min_spread.min(spread);
         self.max_spread = self.max_spread.max(spread);
+        self.entries.push(market_data_entry);
+    }
+
+    pub fn remove_up_to(&mut self, time: u64) {
+        if time < self.start_time_ns || time > self.end_time_ns {
+            return;
+        }
+        self.entries = self
+            .entries
+            .clone()
+            .into_iter()
+            .filter(|entry| entry.utc_epoch_ns > time)
+            .collect();
+
+        // Update counter, min and max.
+        self.count = self.entries.len();
+        self.min_spread = self
+            .entries
+            .iter()
+            .map(|entry| entry.asks[0].price - entry.bids[0].price)
+            .filter(|v| !v.is_nan()) // eliminate NaNs
+            .min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(); // self.min_spread = self.entries.iter().min();
+        self.max_spread = self
+            .entries
+            .iter()
+            .map(|entry| entry.asks[0].price - entry.bids[0].price)
+            .filter(|v| !v.is_nan()) // eliminate NaNs
+            .max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(); // self.max_spread = self.entries.iter().max();
+    }
+
+    pub fn count_start_from(&self, start_time_ns: u64) -> usize {
+        if self.start_time_ns <= start_time_ns && start_time_ns <= self.end_time_ns {
+            self.entries.iter().filter(|entry| entry.utc_epoch_ns >= start_time_ns).count()
+        } else {
+            0
+        }
+    }
+
+    pub fn count_end_before(&self, end_time_ns: u64) -> usize {
+        if self.start_time_ns <= end_time_ns && end_time_ns <= self.end_time_ns {
+            self.entries.iter().filter(|entry| entry.utc_epoch_ns <= end_time_ns).count()
+        } else {
+            0
+        }
     }
 }
 
 #[derive(Debug)]
 pub struct MarketDataCache {
-    pub fine: VecDeque<Bucket>, // for 100ms buckets
-    pub coarse: VecDeque<Bucket>, // for 1 min buckets
-    pub fine_ns: u64,
-    pub coarse_ns: u64,
+    pub buckets: VecDeque<Bucket>,   // for 100ms buckets
+    // pub coarse: VecDeque<Bucket>, // for 1 min buckets
+    pub bucket_ns: u64,
+    // pub coarse_ns: u64,
     pub count: u64,
 }
 
 impl MarketDataCache {
     pub fn new() -> Self {
         Self {
-            fine: VecDeque::with_capacity(36000),
-            coarse: VecDeque::with_capacity(60),
-            fine_ns: 100_000_000, // 100ms
-            coarse_ns: 60 * 1_000_000_000, // 1 minute
+            buckets: VecDeque::with_capacity(36000),
+            // coarse: VecDeque::with_capacity(60),
+            bucket_ns: 100_000_000,          // 100ms
+            // coarse_ns: 60 * 1_000_000_000, // 1 minute
             count: 0,
         }
     }
@@ -133,9 +177,13 @@ impl MarketDataCache {
             });
         }
 
-        info!("Finished reading json file, {} raw entries are identified and {} are valid", entries.len(), market_data_entries.len());
-        let mut cache = Self::new();
+        info!(
+            "Finished reading json file, {} raw entries are identified and {} are valid",
+            entries.len(),
+            market_data_entries.len()
+        );
 
+        let mut cache = Self::new();
         for entry in market_data_entries {
             cache.insert(&entry);
         }
@@ -154,14 +202,24 @@ impl MarketDataCache {
     }
 
     // Get the total number of entries in the cache.
-    pub fn count(&self) -> i64 {
-        unimplemented!()
+    pub fn count(&self) -> u64 {
+        self.count
     }
 
     // Get the number of entries in the given time range.
     // start_time and end_time may be any time within the last 1 hour.
-    pub fn count_range(&self, start_time: i64, end_time: i64) -> i64 {
-        unimplemented!()
+    pub fn count_range(&self, start_time: u64, end_time: u64) -> usize {
+        let cache_start_time_ns = self.buckets[0].start_time_ns;
+        let start_idx = find_bucket_index(self.buckets[0].start_time_ns, start_time, 100_000_000).unwrap();
+        let end_idx = find_bucket_index(self.buckets[0].start_time_ns, end_time, 100_000_000).unwrap();
+
+        let mut cnt = 0;
+        cnt += self.buckets[start_idx].count_start_from(start_time);
+        for i in start_idx+1..end_idx {
+            cnt += self.buckets[i].count;
+        }
+        cnt += self.buckets[end_idx].count_end_before(end_time);
+        cnt
     }
 
     // Get the 10th, 50th, and 90th percentiles of the spread in the given time range.

@@ -1,15 +1,15 @@
-use rust_decimal::Decimal;
+// use rust_decimal::Decimal;
 use crate::market_data::BidAsk;
-use serde_json::Value;
 use log::warn;
+use serde_json::Value;
 
 // All data are financial data so best to use Decimal rather than f64 to represent them.
-pub fn decimal_from_json<'de, D>(deserializer: D) -> Result<Decimal, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    rust_decimal::serde::arbitrary_precision::deserialize(deserializer)
-}
+// pub fn decimal_from_json<'de, D>(deserializer: D) -> Result<Decimal, D::Error>
+// where
+//     D: serde::Deserializer<'de>,
+// {
+//     rust_decimal::serde::arbitrary_precision::deserialize(deserializer)
+// }
 
 pub fn parse_bid_ask_array(arr: &[Value]) -> Vec<BidAsk> {
     let mut result = Vec::new();
@@ -39,4 +39,15 @@ pub fn parse_bid_ask_array(arr: &[Value]) -> Vec<BidAsk> {
         }
     }
     result
+}
+
+pub fn find_bucket_index(first_bucket_start_ns: u64, query_ns: u64, bucket_duration_ns: u64) -> Option<usize> {
+    if query_ns < first_bucket_start_ns {
+        // Query time is before the first bucket
+        return None;
+    }
+
+    let elapsed_ns = query_ns - first_bucket_start_ns;
+    let index = (elapsed_ns / bucket_duration_ns) as usize;
+    Some(index)
 }
