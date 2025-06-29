@@ -28,7 +28,7 @@ pub struct Bucket {
     pub tdigest: TDigest,
     pub min_spread: f64,
     pub max_spread: f64,
-    // TODO: change to reference?
+    // TODO: change to reference? Or just store spread?
     pub entries: Vec<MarketDataEntry>,
 }
 
@@ -58,32 +58,35 @@ impl Bucket {
         if time < self.start_time_ns || time > self.end_time_ns {
             return;
         }
-        self.entries = self
-            .entries
-            .clone()
-            .into_iter()
-            .filter(|entry| entry.utc_epoch_ns > time)
-            .collect();
+        self.entries.retain(|entry| entry.utc_epoch_ns > time);
 
         // Update counter, min and max.
         self.count = self.entries.len();
-        self.min_spread = self
+        let spreads: Vec<f64> = self
             .entries
             .iter()
             .map(|entry| entry.asks[0].price - entry.bids[0].price)
-            .filter(|v| !v.is_nan()) // eliminate NaNs
-            .min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(); // self.min_spread = self.entries.iter().min();
-        self.max_spread = self
-            .entries
+            .filter(|v| v.is_finite()) // 过滤 NaN、inf
+            .collect();
+
+        self.min_spread = *spreads
             .iter()
-            .map(|entry| entry.asks[0].price - entry.bids[0].price)
-            .filter(|v| !v.is_nan()) // eliminate NaNs
-            .max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(); // self.max_spread = self.entries.iter().max();
+            .min_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap();
+        self.max_spread = *spreads
+            .iter()
+            .max_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap(); // self.max_spread = self.entries.iter().max();
+        self.tdigest = TDigest::default();
+        self.tdigest.merge_unsorted(spreads);
     }
 
     pub fn count_start_from(&self, start_time_ns: u64) -> usize {
         if self.start_time_ns <= start_time_ns && start_time_ns <= self.end_time_ns {
-            self.entries.iter().filter(|entry| entry.utc_epoch_ns >= start_time_ns).count()
+            self.entries
+                .iter()
+                .filter(|entry| entry.utc_epoch_ns >= start_time_ns)
+                .count()
         } else {
             0
         }
@@ -91,7 +94,10 @@ impl Bucket {
 
     pub fn count_end_before(&self, end_time_ns: u64) -> usize {
         if self.start_time_ns <= end_time_ns && end_time_ns <= self.end_time_ns {
-            self.entries.iter().filter(|entry| entry.utc_epoch_ns <= end_time_ns).count()
+            self.entries
+                .iter()
+                .filter(|entry| entry.utc_epoch_ns <= end_time_ns)
+                .count()
         } else {
             0
         }
@@ -100,16 +106,18 @@ impl Bucket {
 
 #[derive(Debug)]
 pub struct MarketDataCache {
-    pub buckets: VecDeque<Bucket>,   // for 100ms buckets
+    pub buckets: VecDeque<Bucket>, // for 100ms buckets
     pub bucket_ns: u64,
     pub count: u64,
 }
 
 impl MarketDataCache {
     pub fn new() -> Self {
+        let mut buckets = VecDeque::with_capacity(36000);
+        buckets.resize(36000, Bucket::default());
         Self {
-            buckets: VecDeque::with_capacity(36000),
-            bucket_ns: 100_000_000,          // 100ms
+            buckets,
+            bucket_ns: 100_000_000, // 100ms
             count: 0,
         }
     }
@@ -125,23 +133,23 @@ impl MarketDataCache {
         let entries = json["market_data_entries"].as_array().unwrap();
         let mut market_data_entries = vec![];
 
-        for entry in entries {
+        for (i, entry) in entries.iter().enumerate() {
             // Handle timestamp.
             let utc_epoch_ns = match entry.get("utc_epoch_ns") {
                 Some(Value::Number(n)) if n.as_i64().unwrap() <= 0 => {
-                    warn!("Skipping entry due to invalid timestamp {}", n);
+                    warn!("Skipping entry {} due to invalid timestamp {}", i, n);
                     continue;
                 }
                 Some(Value::Number(n)) => {
                     if let Some(ts) = n.as_u64() {
                         ts
                     } else {
-                        warn!("Skipping entry due to non-u64 timestamp {}", n);
+                        warn!("Skipping entry {} due to non-u64 timestamp {}", i, n);
                         continue;
                     }
                 }
                 _ => {
-                    warn!("Skipping entry due to missing timestamp");
+                    warn!("Skipping entry {} due to missing timestamp in json", i);
                     continue;
                 }
             };
@@ -151,8 +159,8 @@ impl MarketDataCache {
             let bids = match entry.get("bids") {
                 Some(Value::Array(arr)) => parse_bid_ask_array(arr),
                 _ => {
-                    warn!("Skipping entry due to missing or invalid bids array");
-                    Vec::new()
+                    warn!("Skipping entry {} due to missing bids array in json", i);
+                    continue;
                 }
             };
 
@@ -161,16 +169,20 @@ impl MarketDataCache {
             let asks = match entry.get("asks") {
                 Some(Value::Array(arr)) => parse_bid_ask_array(arr),
                 _ => {
-                    warn!("Skipping entry due to missing or invalid asks array");
-                    Vec::new()
+                    warn!("Skipping entry {} due to missing asks array in json", i);
+                    continue;
                 }
             };
 
-            market_data_entries.push(MarketDataEntry {
-                utc_epoch_ns,
-                bids,
-                asks,
-            });
+            if utc_epoch_ns > 0 && bids.len() > 0 && asks.len() > 0 {
+                market_data_entries.push(MarketDataEntry {
+                    utc_epoch_ns,
+                    bids,
+                    asks,
+                });
+            } else {
+                warn!("Skipping entry {} due to empty bids or asks array", i);
+            }
         }
 
         info!(
@@ -200,13 +212,23 @@ impl MarketDataCache {
         }
 
         self.count += 1;
-        let bucket_idx = find_bucket_index(self.buckets[0].start_time_ns, data.utc_epoch_ns, self.bucket_ns).unwrap();
+        let bucket_idx = find_bucket_index(
+            self.buckets[0].start_time_ns,
+            data.utc_epoch_ns,
+            self.bucket_ns,
+        )
+        .unwrap();
         if bucket_idx >= self.buckets.len() {
             let hour_in_ns = 3_600_000_000_000;
             let threshold = data.utc_epoch_ns - hour_in_ns;
             self.remove_up_to(threshold);
         }
-        let bucket_idx = find_bucket_index(self.buckets[0].start_time_ns, data.utc_epoch_ns, self.bucket_ns).unwrap();
+        let bucket_idx = find_bucket_index(
+            self.buckets[0].start_time_ns,
+            data.utc_epoch_ns,
+            self.bucket_ns,
+        )
+        .unwrap();
         self.buckets[bucket_idx].insert(data);
     }
 
@@ -219,6 +241,13 @@ impl MarketDataCache {
             bucket_end_time = popped.end_time_ns;
         }
         self.buckets[0].remove_up_to(time);
+
+        // Insert new buckets.
+        while self.buckets.len() < 36000 {
+            let start = self.buckets.back().unwrap().end_time_ns;
+            self.buckets
+                .push_back(Bucket::new(start, start + self.bucket_ns));
+        }
     }
 
     // Get the total number of entries in the cache.
@@ -230,12 +259,14 @@ impl MarketDataCache {
     // start_time and end_time may be any time within the last 1 hour.
     pub fn count_range(&self, start_time: u64, end_time: u64) -> usize {
         let cache_start_time_ns = self.buckets[0].start_time_ns;
-        let start_idx = find_bucket_index(self.buckets[0].start_time_ns, start_time, 100_000_000).unwrap();
-        let end_idx = find_bucket_index(self.buckets[0].start_time_ns, end_time, 100_000_000).unwrap();
+        let start_idx =
+            find_bucket_index(self.buckets[0].start_time_ns, start_time, 100_000_000).unwrap();
+        let end_idx =
+            find_bucket_index(self.buckets[0].start_time_ns, end_time, 100_000_000).unwrap();
 
         let mut cnt = 0;
         cnt += self.buckets[start_idx].count_start_from(start_time);
-        for i in start_idx+1..end_idx {
+        for i in start_idx + 1..end_idx {
             cnt += self.buckets[i].count;
         }
         cnt += self.buckets[end_idx].count_end_before(end_time);

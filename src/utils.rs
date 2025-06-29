@@ -41,7 +41,11 @@ pub fn parse_bid_ask_array(arr: &[Value]) -> Vec<BidAsk> {
     result
 }
 
-pub fn find_bucket_index(first_bucket_start_ns: u64, query_ns: u64, bucket_duration_ns: u64) -> Option<usize> {
+pub fn find_bucket_index(
+    first_bucket_start_ns: u64,
+    query_ns: u64,
+    bucket_duration_ns: u64,
+) -> Option<usize> {
     if query_ns < first_bucket_start_ns {
         // Query time is before the first bucket
         return None;
