@@ -1,4 +1,4 @@
-use crate::utils::{find_bucket_index, parse_bid_ask_array};
+use crate::utils::{calcualte_ave_price, f64_max, f64_min, find_bucket_index, parse_bid_ask_array};
 use log::{debug, info, warn};
 use serde::Deserialize;
 use serde_json::Value;
@@ -16,8 +16,7 @@ pub struct BidAsk {
 #[derive(Clone, Debug, Deserialize)]
 pub struct MarketDataEntry {
     pub utc_epoch_ns: u64,
-    pub bids: Vec<BidAsk>,
-    pub asks: Vec<BidAsk>,
+    pub spread: f64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -47,7 +46,7 @@ impl Bucket {
 
     pub fn insert(&mut self, market_data_entry: MarketDataEntry) {
         self.count += 1;
-        let spread = market_data_entry.asks[0].price - market_data_entry.bids[0].price;
+        let spread = market_data_entry.spread;
         self.tdigest.merge_unsorted(vec![spread]);
         self.min_spread = self.min_spread.min(spread);
         self.max_spread = self.max_spread.max(spread);
@@ -65,42 +64,44 @@ impl Bucket {
         let spreads: Vec<f64> = self
             .entries
             .iter()
-            .map(|entry| entry.asks[0].price - entry.bids[0].price)
+            .map(|entry| entry.spread)
             .filter(|v| v.is_finite()) // 过滤 NaN、inf
             .collect();
 
-        self.min_spread = *spreads
-            .iter()
-            .min_by(|a, b| a.partial_cmp(b).unwrap())
-            .unwrap();
-        self.max_spread = *spreads
-            .iter()
-            .max_by(|a, b| a.partial_cmp(b).unwrap())
-            .unwrap(); // self.max_spread = self.entries.iter().max();
+        self.min_spread = *f64_min(&spreads).unwrap();
+        self.max_spread = *f64_max(&spreads).unwrap(); // self.max_spread = self.entries.iter().max();
         self.tdigest = TDigest::default();
         self.tdigest.merge_unsorted(spreads);
     }
 
-    pub fn count_start_from(&self, start_time_ns: u64) -> usize {
+    pub fn get_start_from(&self, start_time_ns: u64) -> Vec<&MarketDataEntry> {
         if self.start_time_ns <= start_time_ns && start_time_ns <= self.end_time_ns {
             self.entries
                 .iter()
                 .filter(|entry| entry.utc_epoch_ns >= start_time_ns)
-                .count()
+                .collect()
         } else {
-            0
+            Vec::new()
         }
     }
 
-    pub fn count_end_before(&self, end_time_ns: u64) -> usize {
+    pub fn count_start_from(&self, start_time_ns: u64) -> usize {
+        self.get_start_from(start_time_ns).len()
+    }
+
+    pub fn get_end_before(&self, end_time_ns: u64) -> Vec<&MarketDataEntry> {
         if self.start_time_ns <= end_time_ns && end_time_ns <= self.end_time_ns {
             self.entries
                 .iter()
                 .filter(|entry| entry.utc_epoch_ns <= end_time_ns)
-                .count()
+                .collect()
         } else {
-            0
+            Vec::new()
         }
+    }
+
+    pub fn count_end_before(&self, end_time_ns: u64) -> usize {
+        self.get_end_before(end_time_ns).len()
     }
 }
 
@@ -174,15 +175,24 @@ impl MarketDataCache {
                 }
             };
 
-            if utc_epoch_ns > 0 && bids.len() > 0 && asks.len() > 0 {
-                market_data_entries.push(MarketDataEntry {
-                    utc_epoch_ns,
-                    bids,
-                    asks,
-                });
-            } else {
+            if bids.len() == 0 || asks.len() == 0 {
                 warn!("Skipping entry {} due to empty bids or asks array", i);
+                continue;
             }
+            let spread = asks[0].price - bids[0].price;
+            let ave_bid = calcualte_ave_price(&bids);
+            let ave_ask = calcualte_ave_price(&asks);
+            if spread.abs() >= ave_ask * 0.03 || spread.abs() > ave_bid * 0.03 {
+                warn!(
+                    "Skipping entry {} due to outlier, spread is {} but ave bid is {} and ave ask is {}",
+                    i, spread, ave_bid, ave_ask
+                );
+                continue;
+            }
+            market_data_entries.push(MarketDataEntry {
+                utc_epoch_ns,
+                spread: asks[0].price - bids[0].price,
+            });
         }
 
         info!(
@@ -259,10 +269,9 @@ impl MarketDataCache {
     // start_time and end_time may be any time within the last 1 hour.
     pub fn count_range(&self, start_time: u64, end_time: u64) -> usize {
         let cache_start_time_ns = self.buckets[0].start_time_ns;
-        let start_idx =
-            find_bucket_index(self.buckets[0].start_time_ns, start_time, 100_000_000).unwrap();
-        let end_idx =
-            find_bucket_index(self.buckets[0].start_time_ns, end_time, 100_000_000).unwrap();
+        let start_idx = find_bucket_index(cache_start_time_ns, start_time, self.bucket_ns).unwrap();
+        let end_idx = find_bucket_index(cache_start_time_ns, end_time, self.bucket_ns).unwrap();
+        dbg!(start_idx, end_idx);
 
         let mut cnt = 0;
         cnt += self.buckets[start_idx].count_start_from(start_time);
@@ -282,13 +291,77 @@ impl MarketDataCache {
 
     // Get the minimum spread in the given time range.
     // start_time and end_time may be any time within the last 1 hour.
-    pub fn min_spread(&self, start_time: i64, end_time: i64) -> f64 {
-        unimplemented!()
+    pub fn min_spread(&self, start_time: u64, end_time: u64) -> f64 {
+        let start_idx =
+            find_bucket_index(self.buckets[0].start_time_ns, start_time, self.bucket_ns).unwrap();
+        let end_idx =
+            find_bucket_index(self.buckets[0].start_time_ns, end_time, self.bucket_ns).unwrap();
+        let mut min = f64::MAX;
+
+        // Get the entries after start time in start_idx bucket.
+        let entries1: Vec<f64> = self.buckets[start_idx]
+            .get_start_from(start_time)
+            .iter()
+            .map(|entry| entry.spread)
+            .collect();
+        if entries1.len() > 0 {
+            let min1 = *f64_min(&entries1).unwrap();
+            min = min.min(min1);
+        }
+
+        // Get the entries before end time in end_idx bucket.
+        let entries2: Vec<f64> = self.buckets[end_idx]
+            .get_end_before(end_time)
+            .iter()
+            .map(|entry| entry.spread)
+            .collect();
+        if entries2.len() > 0 {
+            let min2 = *f64_min(&entries2).unwrap();
+            min = min.min(min2);
+        }
+
+        for i in start_idx + 1..end_idx {
+            min = min.min(self.buckets[i].min_spread);
+        }
+
+        min
     }
 
     // Get the maximum spread in the given time range.
     // start_time and end_time may be any time within the last 1 hour.
-    pub fn max_spread(&self, start_time: i64, end_time: i64) -> f64 {
-        unimplemented!()
+    pub fn max_spread(&self, start_time: u64, end_time: u64) -> f64 {
+        let start_idx =
+            find_bucket_index(self.buckets[0].start_time_ns, start_time, self.bucket_ns).unwrap();
+        let end_idx =
+            find_bucket_index(self.buckets[0].start_time_ns, end_time, self.bucket_ns).unwrap();
+        let mut max = f64::MIN;
+
+        // Get the entries after start time in start_idx bucket.
+        let entries1: Vec<f64> = self.buckets[start_idx]
+            .get_start_from(start_time)
+            .iter()
+            .map(|entry| entry.spread)
+            .collect();
+        if entries1.len() > 0 {
+            let max1 = *f64_max(&entries1).unwrap();
+            max = max.max(max1);
+        }
+
+        // Get the entries before end time in end_idx bucket.
+        let entries2: Vec<f64> = self.buckets[end_idx]
+            .get_end_before(end_time)
+            .iter()
+            .map(|entry| entry.spread)
+            .collect();
+        if entries2.len() > 0 {
+            let max2 = *f64_max(&entries2).unwrap();
+            max = max.max(max2);
+        }
+
+        for i in start_idx + 1..end_idx {
+            max = max.max(self.buckets[i].min_spread);
+        }
+
+        max
     }
 }

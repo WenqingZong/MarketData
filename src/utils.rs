@@ -55,3 +55,17 @@ pub fn find_bucket_index(
     let index = (elapsed_ns / bucket_duration_ns) as usize;
     Some(index)
 }
+
+pub fn calcualte_ave_price(bidask: &Vec<BidAsk>) -> f64 {
+    let sum: f64 = bidask.iter().map(|ba| ba.price).sum();
+    let num = bidask.len() as f64;
+    sum / num
+}
+
+pub fn f64_min(array: &Vec<f64>) -> Option<&f64> {
+    array.iter().min_by(|a, b| a.partial_cmp(b).unwrap())
+}
+
+pub fn f64_max(array: &Vec<f64>) -> Option<&f64> {
+    array.iter().max_by(|a, b| a.partial_cmp(b).unwrap())
+}
