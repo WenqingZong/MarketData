@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::BufReader;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
 
 // Third party libraries.
 use serde_json::Value;
@@ -12,7 +13,6 @@ use tdigest::TDigest;
 // Project libraries.
 use crate::types::{Bucket, MarketDataCache, MarketDataEntry};
 use crate::utils::{calculate_ave_price, f64_max, f64_min, find_bucket_index, parse_bid_ask_array};
-
 
 impl MarketDataCache {
     pub fn new(num_buckets: usize, bucket_ns: u64) -> Self {
@@ -118,34 +118,39 @@ impl MarketDataCache {
             let remainder = data.utc_epoch_ns % self.bucket_ns;
             let aligned_start_time_ns = data.utc_epoch_ns - remainder;
             for i in 0..self.num_buckets {
-                self.buckets.push_back(Bucket::new(
+                self.buckets.push_back(Arc::new(RwLock::new(Bucket::new(
                     aligned_start_time_ns + self.bucket_ns * i as u64,
                     aligned_start_time_ns + self.bucket_ns * (i + 1) as u64,
-                ));
+                ))));
             }
         }
 
         self.count.fetch_add(1, Ordering::SeqCst);
-        let bucket_idx = find_bucket_index(
-            self.buckets[0].start_time_ns,
-            data.utc_epoch_ns,
-            self.bucket_ns,
-        )
-        .unwrap();
+        let first_bucket_start_ns = {
+            let first_bucket = self.buckets[0].read().unwrap();
+            first_bucket.start_time_ns
+        };
+        let bucket_idx =
+            find_bucket_index(first_bucket_start_ns, data.utc_epoch_ns, self.bucket_ns).unwrap();
         if bucket_idx >= self.buckets.len() {
             let total_cache_time_in_ns = self.num_buckets as u64 * self.bucket_ns;
-            let cache_start_time_ns = self.buckets[0].start_time_ns;
+            let cache_start_time_ns = first_bucket_start_ns;
             let threshold = cache_start_time_ns + self.bucket_ns * (bucket_idx + 1) as u64
                 - total_cache_time_in_ns;
             self.remove_up_to(threshold);
         }
-        let bucket_idx = find_bucket_index(
-            self.buckets[0].start_time_ns,
-            data.utc_epoch_ns,
-            self.bucket_ns,
-        )
-        .unwrap();
-        self.buckets[bucket_idx].insert(data);
+        // self.buckets changed, so need to re calculate index!
+        let first_bucket_start_ns = {
+            let first_bucket = self.buckets[0].read().unwrap();
+            first_bucket.start_time_ns
+        };
+        let bucket_idx =
+            find_bucket_index(first_bucket_start_ns, data.utc_epoch_ns, self.bucket_ns).unwrap();
+
+        // Get write lock on the target bucket.
+        let bucket = &self.buckets[bucket_idx];
+        let mut bucket_lock = bucket.write().unwrap();
+        bucket_lock.insert(data);
     }
 
     // Remove all entries older or the same age as the specified time.
@@ -153,20 +158,42 @@ impl MarketDataCache {
     // Returns the number of entries deleted.
     pub fn remove_up_to(&mut self, time: u64) -> usize {
         let original_count = self.count.load(Ordering::SeqCst);
-        let mut bucket_end_time = self.buckets[0].end_time_ns;
+        let mut bucket_end_time = {
+            let first_bucket = self.buckets[0].read().unwrap();
+            first_bucket.end_time_ns
+        };
         while bucket_end_time <= time {
             let popped = self.buckets.pop_front().unwrap();
-            bucket_end_time = self.buckets.front().unwrap().end_time_ns;
-            self.count.fetch_sub(popped.count, Ordering::SeqCst);
+            let removed_count = {
+                let popped_bucket = popped.read().unwrap();
+                popped_bucket.count
+            };
+            self.count.fetch_sub(removed_count, Ordering::SeqCst);
+
+            bucket_end_time = {
+                let new_first = self.buckets.front().unwrap().read().unwrap();
+                new_first.end_time_ns
+            };
         }
-        let deleted = self.buckets[0].remove_up_to(time);
+
+        let deleted = {
+            let mut first_bucket = self.buckets[0].write().unwrap();
+            first_bucket.remove_up_to(time)
+        };
         self.count.fetch_sub(deleted, Ordering::SeqCst);
 
         // Insert new buckets.
         while self.buckets.len() < self.num_buckets {
-            let start = self.buckets.back().unwrap().end_time_ns;
-            self.buckets
-                .push_back(Bucket::new(start, start + self.bucket_ns));
+            // Get the end time of the last bucket.
+            let last_end = {
+                let last_bucket = self.buckets.back().unwrap().read().unwrap();
+                last_bucket.end_time_ns
+            };
+
+            self.buckets.push_back(Arc::new(RwLock::new(Bucket::new(
+                last_end,
+                last_end + self.bucket_ns,
+            ))));
         }
         original_count - self.count.load(Ordering::SeqCst)
     }
@@ -179,19 +206,39 @@ impl MarketDataCache {
     // Get the number of entries in the given time range, including both ends.
     // start_time and end_time may be any time within the last 1 hour.
     pub fn count_range(&self, start_time: u64, end_time: u64) -> usize {
-        let cache_start_time_ns = self.buckets[0].start_time_ns;
+        // Get the start time of the first bucket.
+        let cache_start_time_ns = {
+            let first_bucket = self.buckets[0].read().unwrap();
+            first_bucket.start_time_ns
+        };
+
         let start_idx = find_bucket_index(cache_start_time_ns, start_time, self.bucket_ns).unwrap();
         let end_idx = find_bucket_index(cache_start_time_ns, end_time, self.bucket_ns).unwrap();
-        dbg!(start_idx, end_idx);
 
         let mut cnt = 0;
-        cnt += self.buckets[start_idx].count_start_from(start_time);
-        for i in start_idx + 1..end_idx {
-            cnt += self.buckets[i].count;
+
+        // Handle the starting bucket, partial data.
+        cnt += {
+            let bucket = self.buckets[start_idx].read().unwrap();
+            bucket.count_start_from(start_time)
+        };
+
+        // Handle the middle, complete bucket.
+        for i in (start_idx + 1)..end_idx {
+            cnt += {
+                let bucket = self.buckets[i].read().unwrap();
+                bucket.count
+            };
         }
-        if end_idx != start_idx {
-            cnt += self.buckets[end_idx].count_end_before(end_time);
+
+        // Handle the ending bucket, partial data.
+        if start_idx != end_idx {
+            cnt += {
+                let bucket = self.buckets[end_idx].read().unwrap();
+                bucket.count_end_before(end_time)
+            };
         }
+
         cnt
     }
 
@@ -199,78 +246,92 @@ impl MarketDataCache {
     // Spread is defined as the difference between the lowest ask price and highest bid price.
     // start_time and end_time may be any time within the last 1 hour.
     pub fn spread_percentiles(&self, start_time: u64, end_time: u64) -> (f64, f64, f64) {
-        let mut tdigests = vec![];
+        let cache_start_time_ns = {
+            let first_bucket = self.buckets[0].read().unwrap();
+            first_bucket.start_time_ns
+        };
 
-        let cache_start_time_ns = self.buckets[0].start_time_ns;
         let start_idx = find_bucket_index(cache_start_time_ns, start_time, self.bucket_ns).unwrap();
         let end_idx = find_bucket_index(cache_start_time_ns, end_time, self.bucket_ns).unwrap();
+        let mut tdigests = Vec::new();
 
-        let entries1: Vec<f64> = self.buckets[start_idx]
-            .get_start_from(start_time)
-            .iter()
-            .map(|entry| entry.spread)
-            .collect();
-        let mut tdigest1 = TDigest::new_with_size(1000);
-        tdigest1 = tdigest1.merge_unsorted(entries1);
-        tdigests.push(tdigest1);
-
-        for i in start_idx + 1..end_idx {
-            tdigests.push(self.buckets[i].get_tdigest());
+        // Handle the starting bucket, partial data.
+        {
+            let bucket = self.buckets[start_idx].read().unwrap();
+            let entries = bucket.get_start_from(start_time);
+            if !entries.is_empty() {
+                let spreads: Vec<f64> = entries.iter().map(|e| e.spread).collect();
+                tdigests.push(TDigest::new_with_size(1000).merge_unsorted(spreads));
+            }
         }
 
+        // Handle the middle, complete buckets.
+        for i in (start_idx + 1)..end_idx {
+            let bucket = self.buckets[i].read().unwrap();
+            tdigests.push(bucket.get_tdigest());
+        }
+
+        // Handle the last bucket, partial data.
         if start_idx != end_idx {
-            let entries2: Vec<f64> = self.buckets[end_idx]
-                .get_end_before(end_time)
-                .iter()
-                .map(|entry| entry.spread)
-                .collect();
-            let mut tdigest2 = TDigest::new_with_size(1000);
-            tdigest2 = tdigest2.merge_unsorted(entries2);
-            tdigests.push(tdigest2);
+            let bucket = self.buckets[end_idx].read().unwrap();
+            let entries = bucket.get_end_before(end_time);
+            if !entries.is_empty() {
+                let spreads: Vec<f64> = entries.iter().map(|e| e.spread).collect();
+                tdigests.push(TDigest::new_with_size(1000).merge_unsorted(spreads));
+            }
         }
 
-        let tdigest = TDigest::merge_digests(tdigests);
+        let merged = TDigest::merge_digests(tdigests);
         (
-            tdigest.estimate_quantile(0.1),
-            tdigest.estimate_quantile(0.5),
-            tdigest.estimate_quantile(0.9),
+            merged.estimate_quantile(0.1),
+            merged.estimate_quantile(0.5),
+            merged.estimate_quantile(0.9),
         )
     }
 
     // Get the minimum spread in the given time range.
     // start_time and end_time may be any time within the last 1 hour.
     pub fn min_spread(&self, start_time: u64, end_time: u64) -> f64 {
-        let start_idx =
-            find_bucket_index(self.buckets[0].start_time_ns, start_time, self.bucket_ns).unwrap();
-        let end_idx =
-            find_bucket_index(self.buckets[0].start_time_ns, end_time, self.bucket_ns).unwrap();
+        let cache_start_time_ns = {
+            let first_bucket = self.buckets[0].read().unwrap();
+            first_bucket.start_time_ns
+        };
+
+        let start_idx = find_bucket_index(cache_start_time_ns, start_time, self.bucket_ns).unwrap();
+        let end_idx = find_bucket_index(cache_start_time_ns, end_time, self.bucket_ns).unwrap();
         let mut min = f64::MAX;
 
-        // Get the entries after start time in start_idx bucket.
-        let entries1: Vec<f64> = self.buckets[start_idx]
-            .get_start_from(start_time)
-            .iter()
-            .map(|entry| entry.spread)
-            .collect();
-        if entries1.len() > 0 {
-            let min1 = *f64_min(&entries1).unwrap();
-            min = min.min(min1);
+        // Handle the starting bucket, partial data.
+        {
+            let bucket = self.buckets[start_idx].read().unwrap();
+            let entries = bucket.get_start_from(start_time);
+            if !entries.is_empty() {
+                let bucket_min = entries
+                    .iter()
+                    .map(|e| e.spread)
+                    .min_by(|a, b| a.partial_cmp(b).unwrap())
+                    .unwrap();
+                min = min.min(bucket_min);
+            }
         }
 
-        for i in start_idx + 1..end_idx {
-            min = min.min(self.buckets[i].min_spread);
+        // Handle the middle, complete buckets.
+        for i in (start_idx + 1)..end_idx {
+            let bucket = self.buckets[i].read().unwrap();
+            min = min.min(bucket.min_spread);
         }
 
-        // Get the entries before end time in end_idx bucket.
+        // Handle the last bucket, partial data.
         if start_idx != end_idx {
-            let entries2: Vec<f64> = self.buckets[end_idx]
-                .get_end_before(end_time)
-                .iter()
-                .map(|entry| entry.spread)
-                .collect();
-            if entries2.len() > 0 {
-                let min2 = *f64_min(&entries2).unwrap();
-                min = min.min(min2);
+            let bucket = self.buckets[end_idx].read().unwrap();
+            let entries = bucket.get_end_before(end_time);
+            if !entries.is_empty() {
+                let bucket_min = entries
+                    .iter()
+                    .map(|e| e.spread)
+                    .min_by(|a, b| a.partial_cmp(b).unwrap())
+                    .unwrap();
+                min = min.min(bucket_min);
             }
         }
 
@@ -280,37 +341,46 @@ impl MarketDataCache {
     // Get the maximum spread in the given time range.
     // start_time and end_time may be any time within the last 1 hour.
     pub fn max_spread(&self, start_time: u64, end_time: u64) -> f64 {
-        let start_idx =
-            find_bucket_index(self.buckets[0].start_time_ns, start_time, self.bucket_ns).unwrap();
-        let end_idx =
-            find_bucket_index(self.buckets[0].start_time_ns, end_time, self.bucket_ns).unwrap();
+        let cache_start_time_ns = {
+            let first_bucket = self.buckets[0].read().unwrap();
+            first_bucket.start_time_ns
+        };
+
+        let start_idx = find_bucket_index(cache_start_time_ns, start_time, self.bucket_ns).unwrap();
+        let end_idx = find_bucket_index(cache_start_time_ns, end_time, self.bucket_ns).unwrap();
         let mut max = -1.0 * f64::MAX;
 
-        // Get the entries after start time in start_idx bucket.
-        let entries1: Vec<f64> = self.buckets[start_idx]
-            .get_start_from(start_time)
-            .iter()
-            .map(|entry| entry.spread)
-            .collect();
-        if entries1.len() > 0 {
-            let max1 = *f64_max(&entries1).unwrap();
-            max = max.max(max1);
+        // Handle the starting bucket, partial data.
+        {
+            let bucket = self.buckets[start_idx].read().unwrap();
+            let entries = bucket.get_start_from(start_time);
+            if !entries.is_empty() {
+                let bucket_max = entries
+                    .iter()
+                    .map(|e| e.spread)
+                    .max_by(|a, b| a.partial_cmp(b).unwrap())
+                    .unwrap();
+                max = max.max(bucket_max);
+            }
         }
 
-        for i in start_idx + 1..end_idx {
-            max = max.max(self.buckets[i].min_spread);
+        // Handle the middle, complete buckets.
+        for i in (start_idx + 1)..end_idx {
+            let bucket = self.buckets[i].read().unwrap();
+            max = max.max(bucket.max_spread);
         }
 
-        // Get the entries before end time in end_idx bucket.
+        // Handle the last bucket, partial data.
         if start_idx != end_idx {
-            let entries2: Vec<f64> = self.buckets[end_idx]
-                .get_end_before(end_time)
-                .iter()
-                .map(|entry| entry.spread)
-                .collect();
-            if entries2.len() > 0 {
-                let max2 = *f64_max(&entries2).unwrap();
-                max = max.max(max2);
+            let bucket = self.buckets[end_idx].read().unwrap();
+            let entries = bucket.get_end_before(end_time);
+            if !entries.is_empty() {
+                let bucket_max = entries
+                    .iter()
+                    .map(|e| e.spread)
+                    .max_by(|a, b| a.partial_cmp(b).unwrap())
+                    .unwrap();
+                max = max.max(bucket_max);
             }
         }
 
@@ -334,8 +404,9 @@ mod tests {
         assert_eq!(cache.count(), 1);
 
         for (i, bucket) in cache.buckets.iter().enumerate() {
-            assert_eq!(bucket.start_time_ns, i as u64 * 10);
-            assert_eq!(bucket.end_time_ns, (i + 1) as u64 * 10);
+            let read_lock = bucket.read().unwrap();
+            assert_eq!(read_lock.start_time_ns, i as u64 * 10);
+            assert_eq!(read_lock.end_time_ns, (i + 1) as u64 * 10);
         }
         assert_eq!(cache.buckets.len(), 10);
     }

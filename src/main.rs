@@ -16,8 +16,9 @@ fn main() {
     let cache = MarketDataCache::with_file("./market_data.json");
     dbg!(&cache.count());
     dbg!(&cache.buckets.len());
-    let start_time = cache.buckets[0].start_time_ns;
-    let end_time = cache.buckets.back().unwrap().end_time_ns - 10000;
+    let lock = cache.buckets[0].read().unwrap();
+    let start_time = lock.start_time_ns;
+    let end_time = lock.end_time_ns - 10000;
 
     dbg!(&cache.spread_percentiles(start_time, end_time));
 

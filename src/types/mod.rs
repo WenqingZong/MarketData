@@ -5,6 +5,7 @@ pub mod market_data;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, RwLock};
 
 // Third party libraries.
 use serde::Deserialize;
@@ -35,7 +36,7 @@ pub struct Bucket {
 
 #[derive(Debug)]
 pub struct MarketDataCache {
-    pub buckets: VecDeque<Bucket>, // for 100ms buckets
+    pub buckets: VecDeque<Arc<RwLock<Bucket>>>, // for 100ms buckets
     pub bucket_ns: u64,
     pub num_buckets: usize,
     pub count: AtomicUsize,
