@@ -1,16 +1,13 @@
 use log::{debug, info, warn};
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde_json::Value;
+use tdigest::TDigest;
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::BufReader;
-
-fn decimal_from_json<'de, D>(deserializer: D) -> Result<Decimal, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    rust_decimal::serde::arbitrary_precision::deserialize(deserializer)
-}
+use crate::utils::{decimal_from_json, parse_bid_ask_array};
 
 #[derive(Debug, Deserialize)]
 pub struct BidAsk {
@@ -23,19 +20,58 @@ pub struct BidAsk {
 
 #[derive(Debug, Deserialize)]
 pub struct MarketDataEntry {
-    utc_epoch_ns: u64,
-    bids: Vec<BidAsk>,
-    asks: Vec<BidAsk>,
+    pub utc_epoch_ns: u64,
+    pub bids: Vec<BidAsk>,
+    pub asks: Vec<BidAsk>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default)]
+pub struct Bucket {
+    pub start_time_ns: u64,
+    pub count: u64,
+    pub tdigest: TDigest,
+    pub min_spread: Decimal, 
+    pub max_spread: Decimal,
+}
+
+impl Bucket {
+    pub fn new(start_time_ns: u64) -> Self {
+        Self {
+            start_time_ns,
+            count: 0,
+            tdigest: TDigest::default(),
+            min_spread: Decimal::MAX,
+            max_spread: Decimal::MIN,
+        }
+    }
+
+    pub fn add(&mut self, market_data_entry: &MarketDataEntry) {
+        self.count += 1;
+        let spread = market_data_entry.asks[0].price - market_data_entry.bids[0].price;
+        self.tdigest.merge_unsorted(vec![spread.to_f64().unwrap()]);
+        self.min_spread = self.min_spread.min(spread);
+        self.max_spread = self.max_spread.max(spread);
+    }
+}
+
+#[derive(Debug)]
 pub struct MarketDataCache {
-    pub market_data_entries: Vec<MarketDataEntry>,
+    pub fine: VecDeque<Bucket>, // for 100ms buckets
+    pub coarse: VecDeque<Bucket>, // for 1 min buckets
+    pub fine_ns: u64,
+    pub coarse_ns: u64,
+    pub count: u64,
 }
 
 impl MarketDataCache {
     pub fn new() -> Self {
-        unimplemented!()
+        Self {
+            fine: VecDeque::with_capacity(36000),
+            coarse: VecDeque::with_capacity(60),
+            fine_ns: 100_000_000, // 100ms
+            coarse_ns: 60 * 1_000_000_000, // 1 minute
+            count: 0,
+        }
     }
 
     // Pre-populate with data for testing.
@@ -71,6 +107,7 @@ impl MarketDataCache {
             };
 
             // Handle bids.
+            // Note that the raw data is already sorted from highest to lowest.
             let bids = match entry.get("bids") {
                 Some(Value::Array(arr)) => parse_bid_ask_array(arr),
                 _ => {
@@ -80,6 +117,7 @@ impl MarketDataCache {
             };
 
             // Handle asks.
+            // Note that the raw data is already sorted, from lowest to highest.
             let asks = match entry.get("asks") {
                 Some(Value::Array(arr)) => parse_bid_ask_array(arr),
                 _ => {
@@ -96,13 +134,16 @@ impl MarketDataCache {
         }
 
         info!("Finished reading json file, {} raw entries are identified and {} are valid", entries.len(), market_data_entries.len());
-        Self {
-            market_data_entries,
+        let mut cache = Self::new();
+
+        for entry in market_data_entries {
+            cache.insert(&entry);
         }
+        cache
     }
 
     // Insert an entry into the cache.
-    pub fn insert(&mut self, data: &Self) {
+    pub fn insert(&mut self, data: &MarketDataEntry) {
         unimplemented!()
     }
 
@@ -141,34 +182,4 @@ impl MarketDataCache {
     pub fn max_spread(&self, start_time: i64, end_time: i64) -> f64 {
         unimplemented!()
     }
-}
-
-fn parse_bid_ask_array(arr: &[Value]) -> Vec<BidAsk> {
-    let mut result = Vec::new();
-    for item in arr {
-        // Skip if entry is not an object.
-        let obj = match item.as_object() {
-            Some(o) => o,
-            None => {
-                warn!("Skipping bid/ask entry due to non-object entry in bid/ask array");
-                continue;
-            }
-        };
-
-        // Check if BOTH price and amount exist and are not null.
-        let is_valid = obj.get("price").map_or(false, |v| !v.is_null())
-            && obj.get("amount").map_or(false, |v| !v.is_null());
-
-        if !is_valid {
-            warn!("Skipping bid/ask entry due to missing or null for price/amount");
-            continue;
-        }
-
-        // The actual deserialize.
-        match serde_json::from_value::<BidAsk>(item.clone()) {
-            Ok(bid_ask) => result.push(bid_ask),
-            Err(e) => warn!("Skipping bid/ask entry due to deserialization error: {}", e),
-        }
-    }
-    result
 }

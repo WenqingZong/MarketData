@@ -1,4 +1,5 @@
 mod market_data;
+mod utils;
 use env_logger;
 use log::{LevelFilter, info, warn};
 
