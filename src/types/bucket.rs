@@ -75,8 +75,13 @@ impl Bucket {
             .filter(|v| v.is_finite()) // Filter out NaN、inf
             .collect();
 
-        self.min_spread = *f64_min(&spreads).unwrap();
-        self.max_spread = *f64_max(&spreads).unwrap();
+        if self.count > 0 {
+            self.min_spread = *f64_min(&spreads).unwrap();
+            self.max_spread = *f64_max(&spreads).unwrap();
+        } else {
+            self.min_spread = f64::MAX;
+            self.max_spread = -f64::MAX;
+        }
 
         // Lazy calculation again.
         self.tdigest = RefCell::new(None);

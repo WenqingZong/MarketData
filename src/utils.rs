@@ -68,12 +68,12 @@ pub fn calculate_ave_price(bidask: &[BidAsk]) -> Option<f64> {
     Some(sum / num as f64)
 }
 
-/// Find min value in an f64 array.
+/// Find min value in an f64 array. Return None if the input array is empty.
 pub fn f64_min(array: &[f64]) -> Option<&f64> {
     array.iter().min_by(|a, b| a.partial_cmp(b).unwrap())
 }
 
-/// Find max value in an f64 array.
+/// Find max value in an f64 array. Return None if the input array is empty.
 pub fn f64_max(array: &[f64]) -> Option<&f64> {
     array.iter().max_by(|a, b| a.partial_cmp(b).unwrap())
 }

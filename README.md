@@ -15,7 +15,7 @@ Each Bucket is warped in a RwLock for multi-threading processing, and also, `ray
 ## Env
 Code is tested in Window 11, with `cargo 1.88.0 (873a06493 2025-05-10)`.
 
-You can just do a `cargo run` to play with the sample data, or `cargo test` to see all of the unit tests. 
+You can just do a `cargo run --release` to play with the sample data, or `cargo test` to see all of the unit tests. 
 
 ## TDigest
 For calculating percentiles, I used a third party library, `tdigest`. It's believed to provide a good performance even with streaming input. However, my experiments shows that streaming calculation is a bit slower than off-line processing, so in my implementation, all tdigest calculation are done in a lazy manner: Nothing is calculated/updated while inserting new data into bucket, it's only calculated and get cached when asked for the result. 

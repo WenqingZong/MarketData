@@ -143,7 +143,12 @@ impl MarketDataCache {
 
         // Find the desired bucket to insert into.
         let bucket_idx =
-            find_bucket_index(first_bucket_start_ns, data.utc_epoch_ns, self.bucket_ns).unwrap();
+            match find_bucket_index(first_bucket_start_ns, data.utc_epoch_ns, self.bucket_ns) {
+                Some(idx) => idx,
+                None => {
+                    return
+                }
+            };
 
         if bucket_idx >= self.buckets.len() {
             // So the new data is out of our cache time, need to delete some old data now!
