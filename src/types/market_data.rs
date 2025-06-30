@@ -1,3 +1,7 @@
+//! Our main logic of this in-memory cache structure. A [MarketDataCache] consists of a Deque of continues [Bucket]s,
+//! with O(1) time for pop front, push back, and indexing. Also, each [Bucket] object is warped in a [RwLock] for faster
+//! multithreading access. Counter itself is Atomic as it's expected that this value will be updated often.
+
 // System libraries.
 use log::{info, warn};
 use std::collections::VecDeque;
@@ -16,6 +20,7 @@ use crate::types::{Bucket, MarketDataCache, MarketDataEntry};
 use crate::utils::{calculate_ave_price, find_bucket_index, parse_bid_ask_array};
 
 impl MarketDataCache {
+    /// A [MarketDataCache] object can hold data in the last num_buckets * bucket_ns ns.
     pub fn new(num_buckets: usize, bucket_ns: u64) -> Self {
         let buckets = VecDeque::with_capacity(num_buckets);
         Self {
@@ -26,13 +31,15 @@ impl MarketDataCache {
         }
     }
 
-    // Pre-populate with data for testing.
+    /// Pre-populate with data for testing. This method will assume bucket size of 100ms and 36000 buckets, which is
+    /// 1 hour of data. This method also handles some errors in input data, e.g. missing expected json fields, apparent
+    /// outliers, etc.
     pub fn with_file(file_path: &str) -> Self {
         info!("Reading json file {file_path}");
         let file = File::open(file_path).unwrap();
         let reader = BufReader::new(file);
 
-        // Some fields in input json are invalid, so first read everything as raw json values and filter them out later.
+        // Some entries in input json are invalid, so first read everything as raw json values and filter them out later.
         let json: Value = serde_json::from_reader(reader).unwrap();
         let entries = json["market_data_entries"].as_array().unwrap();
         let mut market_data_entries = vec![];
@@ -83,6 +90,7 @@ impl MarketDataCache {
                 continue;
             }
             let spread = asks[0].price - bids[0].price;
+
             // Safe unwrap here, because we already checked 0.
             let ave_bid = calculate_ave_price(&bids).unwrap();
             let ave_ask = calculate_ave_price(&asks).unwrap();
@@ -104,6 +112,7 @@ impl MarketDataCache {
             market_data_entries.len()
         );
 
+        // 1 hour data, and each bucket is 100ms.
         let mut cache = Self::new(36000, 100_000_000);
         for entry in market_data_entries {
             cache.insert(entry);
@@ -111,10 +120,11 @@ impl MarketDataCache {
         cache
     }
 
-    // Insert an entry into the cache.
+    /// Insert an entry into the cache.
     pub fn insert(&mut self, data: MarketDataEntry) {
         if self.buckets.is_empty() {
-            // We need to initialize all buckets.
+            // Need to initialize all buckets.
+            // We use aligned bucket start time for easier implementation.
             let remainder = data.utc_epoch_ns % self.bucket_ns;
             let aligned_start_time_ns = data.utc_epoch_ns - remainder;
             for i in 0..self.num_buckets {
@@ -130,9 +140,13 @@ impl MarketDataCache {
             let first_bucket = self.buckets[0].read().unwrap();
             first_bucket.start_time_ns
         };
+
+        // Find the desired bucket to insert into.
         let bucket_idx =
             find_bucket_index(first_bucket_start_ns, data.utc_epoch_ns, self.bucket_ns).unwrap();
+
         if bucket_idx >= self.buckets.len() {
+            // So the new data is out of our cache time, need to delete some old data now!
             let total_cache_time_in_ns = self.num_buckets as u64 * self.bucket_ns;
             let cache_start_time_ns = first_bucket_start_ns;
             let threshold = cache_start_time_ns + self.bucket_ns * (bucket_idx + 1) as u64
@@ -153,9 +167,9 @@ impl MarketDataCache {
         bucket_lock.insert(data);
     }
 
-    // Remove all entries older or the same age as the specified time.
-    // This function is only used for some periodic cleanup.
-    // Returns the number of entries deleted.
+    /// Remove all entries older or the same age as the specified time.
+    /// This function is only used for some periodic cleanup.
+    /// Returns the number of entries deleted.
     pub fn remove_up_to(&mut self, time: u64) -> usize {
         let original_count = self.count.load(Ordering::SeqCst);
         let mut bucket_end_time = {
@@ -163,6 +177,7 @@ impl MarketDataCache {
             first_bucket.end_time_ns
         };
         while bucket_end_time <= time {
+            // Delete the whole bucket.
             let popped = self.buckets.pop_front().unwrap();
             let removed_count = {
                 let popped_bucket = popped.read().unwrap();
@@ -176,13 +191,14 @@ impl MarketDataCache {
             };
         }
 
+        // Now, cannot just delete the whole next Bucket, but only a small portion of its data.
         let deleted = {
             let mut first_bucket = self.buckets[0].write().unwrap();
             first_bucket.remove_up_to(time)
         };
         self.count.fetch_sub(deleted, Ordering::SeqCst);
 
-        // Insert new buckets.
+        // We deleted some old buckets, time to insert new buckets to keep our total cache duration unchanged.
         while self.buckets.len() < self.num_buckets {
             // Get the end time of the last bucket.
             let last_end = {
@@ -198,14 +214,15 @@ impl MarketDataCache {
         original_count - self.count.load(Ordering::SeqCst)
     }
 
-    // Get the total number of entries in the cache.
+    /// Get the total number of entries in the cache.
     pub fn count(&self) -> usize {
         self.count.load(Ordering::SeqCst)
     }
 
-    // Get the number of entries in the given time range, including both ends.
-    // start_time and end_time may be any time within the last 1 hour.
+    /// Get the number of entries in the given time range, including both ends.
+    /// start_time and end_time may be any time within the last 1 hour.
     pub fn count_range(&self, start_time: u64, end_time: u64) -> usize {
+        // No sanity check here because we assumed start and end time are valid.
         // Get the start time of the first bucket.
         let cache_start_time_ns = {
             let first_bucket = self.buckets[0].read().unwrap();
@@ -223,12 +240,15 @@ impl MarketDataCache {
             bucket.count_start_from(start_time)
         };
 
-        // Handle the middle, complete bucket.
-        for i in (start_idx + 1)..end_idx {
-            cnt += {
-                let bucket = self.buckets[i].read().unwrap();
-                bucket.count
-            };
+        // Handle the middle, complete bucket. Use rayon to speedup.
+        if start_idx + 1 < end_idx {
+            cnt += (start_idx + 1..end_idx)
+                .into_par_iter()
+                .map(|i| {
+                    let bucket = self.buckets[i].read().unwrap();
+                    bucket.count
+                })
+                .sum::<usize>();
         }
 
         // Handle the ending bucket, partial data.
@@ -242,10 +262,11 @@ impl MarketDataCache {
         cnt
     }
 
-    // Get the 10th, 50th, and 90th percentiles of the spread in the given time range.
-    // Spread is defined as the difference between the lowest ask price and highest bid price.
-    // start_time and end_time may be any time within the last 1 hour.
+    /// Get the 10th, 50th, and 90th percentiles of the spread in the given time range.
+    /// Spread is defined as the difference between the lowest ask price and highest bid price.
+    /// start_time and end_time may be any time within the last 1 hour.
     pub fn spread_percentiles(&self, start_time: u64, end_time: u64) -> (f64, f64, f64) {
+        // No sanity check here because we assumed start and end time are valid.
         let cache_start_time_ns = {
             let first_bucket = self.buckets[0].read().unwrap();
             first_bucket.start_time_ns
@@ -265,7 +286,7 @@ impl MarketDataCache {
             }
         }
 
-        // Handle the middle, complete buckets.
+        // Handle the middle, complete buckets. Use rayon to speedup.
         let middle_tdigests: Vec<_> = (start_idx + 1..end_idx)
             .into_par_iter()
             .map(|i| {
@@ -293,8 +314,8 @@ impl MarketDataCache {
         )
     }
 
-    // Get the minimum spread in the given time range.
-    // start_time and end_time may be any time within the last 1 hour.
+    /// Get the minimum spread in the given time range.
+    /// start_time and end_time may be any time within the last 1 hour.
     pub fn min_spread(&self, start_time: u64, end_time: u64) -> f64 {
         let cache_start_time_ns = {
             let first_bucket = self.buckets[0].read().unwrap();
@@ -319,7 +340,7 @@ impl MarketDataCache {
             }
         }
 
-        // Handle the middle, complete buckets.
+        // Handle the middle, complete buckets. Use rayon to speedup.
         let middle_part_min = (start_idx + 1..end_idx)
             .into_par_iter()
             .map(|i| {
@@ -373,7 +394,7 @@ impl MarketDataCache {
             }
         }
 
-        // Handle the middle, complete buckets.
+        // Handle the middle, complete buckets. Use rayon to speedup.
         let middle_part_max = (start_idx + 1..end_idx)
             .into_par_iter()
             .map(|i| {

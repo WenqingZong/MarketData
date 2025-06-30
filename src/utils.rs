@@ -1,3 +1,6 @@
+//! Some helper functions, not necessarily directly related to the main logic, extracted to separate function for better
+//! readability.
+
 // System libraries.
 use log::warn;
 
@@ -7,6 +10,7 @@ use serde_json::Value;
 // Project libraries.
 use crate::types::BidAsk;
 
+/// Parse the bid/ask array from json string to Rust structure.
 pub fn parse_bid_ask_array(arr: &[Value]) -> Vec<BidAsk> {
     let mut result = Vec::new();
     for item in arr {
@@ -28,7 +32,7 @@ pub fn parse_bid_ask_array(arr: &[Value]) -> Vec<BidAsk> {
             continue;
         }
 
-        // The actual deserialize.
+        // The actual deserialize process.
         match serde_json::from_value::<BidAsk>(item.clone()) {
             Ok(bid_ask) => result.push(bid_ask),
             Err(e) => warn!("Skipping bid/ask entry due to deserialization error: {e}"),
@@ -37,6 +41,8 @@ pub fn parse_bid_ask_array(arr: &[Value]) -> Vec<BidAsk> {
     result
 }
 
+/// Find bucket index based on first bucket start ns, the query ns, and the duration of each bucket.
+/// Return None if the query ns is less than first bucket start ns, as it's impossible to find such index.
 pub fn find_bucket_index(
     first_bucket_start_ns: u64,
     query_ns: u64,
@@ -52,6 +58,7 @@ pub fn find_bucket_index(
     Some(index)
 }
 
+/// Calculate the average price in a given bid/ask array.
 pub fn calculate_ave_price(bidask: &[BidAsk]) -> Option<f64> {
     let num = bidask.len();
     if num == 0 {
@@ -61,10 +68,12 @@ pub fn calculate_ave_price(bidask: &[BidAsk]) -> Option<f64> {
     Some(sum / num as f64)
 }
 
+/// Find min value in an f64 array.
 pub fn f64_min(array: &[f64]) -> Option<&f64> {
     array.iter().min_by(|a, b| a.partial_cmp(b).unwrap())
 }
 
+/// Find max value in an f64 array.
 pub fn f64_max(array: &[f64]) -> Option<&f64> {
     array.iter().max_by(|a, b| a.partial_cmp(b).unwrap())
 }

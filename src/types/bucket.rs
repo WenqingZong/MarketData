@@ -1,3 +1,5 @@
+//! [Bucket] is our smallest cache unit, it holds the cached result of small amount of time.
+
 // System libraries.
 use std::cell::RefCell;
 
@@ -13,11 +15,13 @@ unsafe impl Send for Bucket {}
 unsafe impl Sync for Bucket {}
 
 impl Bucket {
+    /// A [Bucket] is defined by its start and end time, represented by u64 in ns.
     pub fn new(start_time_ns: u64, end_time_ns: u64) -> Self {
         Self {
             start_time_ns,
             end_time_ns,
             count: 0,
+            // We will use a lazy calculation, so most of the time, tdigest will remain None.
             tdigest: RefCell::new(None),
             min_spread: f64::MAX,
             max_spread: -f64::MAX,
@@ -25,6 +29,8 @@ impl Bucket {
         }
     }
 
+    /// Insert one more [MarketDataEntry] to [Bucket]. If entry utc time is not in the range of this bucket, insert will
+    /// return false. Otherwise true.
     pub fn insert(&mut self, market_data_entry: MarketDataEntry) -> bool {
         // A quick check the new data indeed belongs to this bucket.
         if !(self.start_time_ns <= market_data_entry.utc_epoch_ns
@@ -36,65 +42,82 @@ impl Bucket {
         self.tdigest = RefCell::new(None);
         self.count += 1;
         let spread = market_data_entry.spread;
+
+        // Update our cache results.
         self.min_spread = self.min_spread.min(spread);
         self.max_spread = self.max_spread.max(spread);
+
+        // Original values will be used when we only want to select a part of this bucket's data, so still need to store
+        // them.
         self.entries.push(market_data_entry);
+
         true
     }
 
-    pub fn remove_up_to(&mut self, time: u64) -> usize {
-        if time < self.start_time_ns || time > self.end_time_ns {
+    /// If threshold is in the range of [Bucket] start and end timestamp, then remove everything happens before
+    /// threshold and return the number of elements removed. Otherwise, return 0.
+    pub fn remove_up_to(&mut self, threshold: u64) -> usize {
+        if threshold < self.start_time_ns || threshold > self.end_time_ns {
+            // If <, everything should be kept, if >, then the whole bucket should be removed from our cache.
             return 0;
         }
 
         let original_count = self.count;
-        self.entries.retain(|entry| entry.utc_epoch_ns > time);
+        // Filter out.
+        self.entries.retain(|entry| entry.utc_epoch_ns > threshold);
 
-        // Update counter, min and max.
+        // Update count, min and max.
         self.count = self.entries.len();
         let spreads: Vec<f64> = self
             .entries
             .iter()
             .map(|entry| entry.spread)
-            .filter(|v| v.is_finite()) // 过滤 NaN、inf
+            .filter(|v| v.is_finite()) // Filter out NaN、inf
             .collect();
 
         self.min_spread = *f64_min(&spreads).unwrap();
-        self.max_spread = *f64_max(&spreads).unwrap(); // self.max_spread = self.entries.iter().max();
+        self.max_spread = *f64_max(&spreads).unwrap();
+
+        // Lazy calculation again.
         self.tdigest = RefCell::new(None);
         original_count - self.count
     }
 
-    pub fn get_start_from(&self, start_time_ns: u64) -> Vec<&MarketDataEntry> {
-        if self.start_time_ns <= start_time_ns && start_time_ns <= self.end_time_ns {
+    /// Get everything between [threshold time, bucket end time].
+    pub fn get_start_from(&self, threshold: u64) -> Vec<&MarketDataEntry> {
+        if self.start_time_ns <= threshold && threshold <= self.end_time_ns {
             self.entries
                 .iter()
-                .filter(|entry| entry.utc_epoch_ns >= start_time_ns)
+                .filter(|entry| entry.utc_epoch_ns >= threshold)
                 .collect()
         } else {
             Vec::new()
         }
     }
 
-    pub fn count_start_from(&self, start_time_ns: u64) -> usize {
-        self.get_start_from(start_time_ns).len()
+    /// Count number of elements in between [threshold time, bucket end time].
+    pub fn count_start_from(&self, threshold: u64) -> usize {
+        self.get_start_from(threshold).len()
     }
 
-    pub fn get_end_before(&self, end_time_ns: u64) -> Vec<&MarketDataEntry> {
-        if self.start_time_ns <= end_time_ns && end_time_ns <= self.end_time_ns {
+    /// Get everything between [bucket start time, threshold].
+    pub fn get_end_before(&self, threshold: u64) -> Vec<&MarketDataEntry> {
+        if self.start_time_ns <= threshold && threshold <= self.end_time_ns {
             self.entries
                 .iter()
-                .filter(|entry| entry.utc_epoch_ns <= end_time_ns)
+                .filter(|entry| entry.utc_epoch_ns <= threshold)
                 .collect()
         } else {
             Vec::new()
         }
     }
 
-    pub fn count_end_before(&self, end_time_ns: u64) -> usize {
-        self.get_end_before(end_time_ns).len()
+    /// Count number of elements in between [bucket start time, threshold].
+    pub fn count_end_before(&self, threshold: u64) -> usize {
+        self.get_end_before(threshold).len()
     }
 
+    /// Lazy calculate of TDigest.
     pub fn get_tdigest(&self) -> TDigest {
         let mut tdigest_opt = self.tdigest.borrow_mut();
         if let Some(tdigest) = &*tdigest_opt {
