@@ -5,7 +5,7 @@
 //! It's highly likely that our actual query need to take multiple buckets
 //! into consideration, we will handle each query in three parts:
 //! 1. The bucket that contains start time, get everything in this bucket that happens after start time.
-//! 2. The buckets in the middle of start to end. These are whole bucket, and their result is already calculated and
+//! 2. The buckets in the middle of start to end. These are whole buckets, and their result are already calculated and
 //!    cached in themselves.
 //! 3. The bucket that contains end time. get everything in this bucket that happens before end time.
 
