@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 // Third party libraries.
+use rayon::prelude::*;
 use serde_json::Value;
 use tdigest::TDigest;
 
@@ -265,10 +266,14 @@ impl MarketDataCache {
         }
 
         // Handle the middle, complete buckets.
-        for i in (start_idx + 1)..end_idx {
-            let bucket = self.buckets[i].read().unwrap();
-            tdigests.push(bucket.get_tdigest());
-        }
+        let middle_tdigests: Vec<_> = (start_idx + 1..end_idx)
+            .into_par_iter()
+            .map(|i| {
+                let bucket = self.buckets[i].read().unwrap();
+                bucket.get_tdigest()
+            })
+            .collect();
+        tdigests.extend(middle_tdigests);
 
         // Handle the last bucket, partial data.
         if start_idx != end_idx {
@@ -315,10 +320,15 @@ impl MarketDataCache {
         }
 
         // Handle the middle, complete buckets.
-        for i in (start_idx + 1)..end_idx {
-            let bucket = self.buckets[i].read().unwrap();
-            min = min.min(bucket.min_spread);
-        }
+        let middle_part_min = (start_idx + 1..end_idx)
+            .into_par_iter()
+            .map(|i| {
+                let bucket = self.buckets[i].read().unwrap();
+                bucket.min_spread
+            })
+            .min_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap_or(f64::MAX);
+        min = min.min(middle_part_min);
 
         // Handle the last bucket, partial data.
         if start_idx != end_idx {
@@ -364,10 +374,15 @@ impl MarketDataCache {
         }
 
         // Handle the middle, complete buckets.
-        for i in (start_idx + 1)..end_idx {
-            let bucket = self.buckets[i].read().unwrap();
-            max = max.max(bucket.max_spread);
-        }
+        let middle_part_max = (start_idx + 1..end_idx)
+            .into_par_iter()
+            .map(|i| {
+                let bucket = self.buckets[i].read().unwrap();
+                bucket.max_spread
+            })
+            .max_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap_or_else(|| -f64::MAX);
+        max = max.max(middle_part_max);
 
         // Handle the last bucket, partial data.
         if start_idx != end_idx {
