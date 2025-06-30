@@ -47,7 +47,8 @@ impl MarketDataCache {
         for (i, entry) in entries.iter().enumerate() {
             // Handle timestamp.
             let utc_epoch_ns = match entry.get("utc_epoch_ns") {
-                Some(Value::Number(n)) if n.as_i64().unwrap() <= 0 => {
+                // This timestamp is 2009 Jan 3, time of the first bitcoin block.
+                Some(Value::Number(n)) if n.as_i64().unwrap() <= 1230940800000000000 => {
                     warn!("Skipping entry {i} due to invalid timestamp {n}");
                     continue;
                 }
@@ -145,9 +146,7 @@ impl MarketDataCache {
         let bucket_idx =
             match find_bucket_index(first_bucket_start_ns, data.utc_epoch_ns, self.bucket_ns) {
                 Some(idx) => idx,
-                None => {
-                    return
-                }
+                None => return,
             };
 
         if bucket_idx >= self.buckets.len() {
@@ -237,6 +236,14 @@ impl MarketDataCache {
         let start_idx = find_bucket_index(cache_start_time_ns, start_time, self.bucket_ns).unwrap();
         let end_idx = find_bucket_index(cache_start_time_ns, end_time, self.bucket_ns).unwrap();
 
+        // If start and end points to the same bucket.
+        if start_idx == end_idx {
+            return self.buckets[start_idx]
+                .read()
+                .unwrap()
+                .count_in_between(start_time, end_time);
+        }
+
         let mut cnt = 0;
 
         // Handle the starting bucket, partial data.
@@ -279,6 +286,23 @@ impl MarketDataCache {
 
         let start_idx = find_bucket_index(cache_start_time_ns, start_time, self.bucket_ns).unwrap();
         let end_idx = find_bucket_index(cache_start_time_ns, end_time, self.bucket_ns).unwrap();
+
+        // If start and end points to the same bucket.
+        if start_idx == end_idx {
+            let bucket = self.buckets[start_idx].read().unwrap();
+            let entries: Vec<f64> = bucket
+                .get_in_between(start_time, end_time)
+                .iter()
+                .map(|e| e.spread)
+                .collect();
+            let tdigest = TDigest::new_with_size(entries.len()).merge_unsorted(entries);
+            return (
+                tdigest.estimate_quantile(0.1),
+                tdigest.estimate_quantile(0.5),
+                tdigest.estimate_quantile(0.9),
+            );
+        }
+
         let mut tdigests = Vec::new();
 
         // Handle the starting bucket, partial data.
@@ -330,6 +354,22 @@ impl MarketDataCache {
         let start_idx = find_bucket_index(cache_start_time_ns, start_time, self.bucket_ns).unwrap();
         let end_idx = find_bucket_index(cache_start_time_ns, end_time, self.bucket_ns).unwrap();
         let mut min = f64::MAX;
+
+        // If start and end points to the same bucket.
+        if start_idx == end_idx {
+            let bucket = self.buckets[start_idx].read().unwrap();
+            let entries = bucket.get_in_between(start_time, end_time);
+            if !entries.is_empty() {
+                let bucket_min = entries
+                    .iter()
+                    .map(|e| e.spread)
+                    .min_by(|a, b| a.partial_cmp(b).unwrap())
+                    .unwrap();
+                return min.min(bucket_min);
+            } else {
+                return min;
+            }
+        }
 
         // Handle the starting bucket, partial data.
         {
@@ -384,6 +424,20 @@ impl MarketDataCache {
         let start_idx = find_bucket_index(cache_start_time_ns, start_time, self.bucket_ns).unwrap();
         let end_idx = find_bucket_index(cache_start_time_ns, end_time, self.bucket_ns).unwrap();
         let mut max = -f64::MAX;
+
+        // If start and end points to the same bucket.
+        if start_idx == end_idx {
+            let bucket = self.buckets[start_idx].read().unwrap();
+            let entries = bucket.get_in_between(start_time, end_time);
+            if !entries.is_empty() {
+                let bucket_max = entries
+                    .iter()
+                    .map(|e| e.spread)
+                    .max_by(|a, b| a.partial_cmp(b).unwrap())
+                    .unwrap();
+                return max.max(bucket_max);
+            }
+        }
 
         // Handle the starting bucket, partial data.
         {

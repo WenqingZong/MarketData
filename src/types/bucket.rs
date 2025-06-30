@@ -134,6 +134,22 @@ impl Bucket {
         *tdigest_opt = Some(new_tdigest.clone());
         new_tdigest
     }
+
+    /// Get the samples in between start and end, and both of the threshold are in the same bucket.
+    pub fn get_in_between(&self, start: u64, end: u64) -> Vec<&MarketDataEntry> {
+        if !(self.start_time_ns <= start && start <= end && end <= self.end_time_ns) {
+            return Vec::new();
+        }
+        self.entries
+            .iter()
+            .filter(|entry| start <= entry.utc_epoch_ns && entry.utc_epoch_ns <= end)
+            .collect()
+    }
+
+    /// Count the samples in between start and end, and both of the threshold are in the same bucket.
+    pub fn count_in_between(&self, start: u64, end: u64) -> usize {
+        self.get_in_between(start, end).len()
+    }
 }
 
 #[cfg(test)]
@@ -257,6 +273,31 @@ mod tests {
 
         assert_eq!(min_spread, 0.0);
         assert_eq!(max_spread, 10.0);
+    }
+
+    #[test]
+    fn test_get_in_between() {
+        let market_data_entries: Vec<MarketDataEntry> = (0..20)
+            .map(|i| MarketDataEntry {
+                utc_epoch_ns: i,
+                spread: i as f64,
+            })
+            .collect();
+        let mut bucket = Bucket::new(0, 20);
+        for entry in market_data_entries {
+            bucket.insert(entry);
+        }
+
+        assert_eq!(bucket.count_in_between(5, 15), 11);
+        let entries = bucket.get_in_between(5, 15);
+        let spreads: Vec<f64> = entries.iter().map(|entry| entry.spread).collect();
+        let min_spread = *f64_min(&spreads).unwrap();
+        let max_spread = *f64_max(&spreads).unwrap();
+
+        assert_eq!(min_spread, 5.0);
+        assert_eq!(max_spread, 15.0);
+
+        assert_eq!(bucket.count_in_between(5, 25), 0);
     }
 
     #[test]

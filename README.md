@@ -22,6 +22,9 @@ For calculating percentiles, I used a third party library, `tdigest`. It's belie
 
 It's also worth mentioning that TDigest algorithm comes with a small amount error. One hyper parameter in TDigest is the number of centroids, the more centroids, the higher accuracy, and also the longer computing time. In my implementation, a magic number `100` is used, which is also the default choice to balance speed and accuracy. Also, in General Idea step 2, I used the cached tdigest rather than recalculate from raw market data entries to avoid wasting time, but this double compression does come with an accuracy penalty. 
 
+## Benchmark
+`cargo bench`
+
 ## Documentation
 `cargo doc --open`
 

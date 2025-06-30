@@ -29,6 +29,7 @@ fn main() {
 
     let lock = cache.buckets[0].read().unwrap();
     let start_time = lock.start_time_ns;
+    let lock = cache.buckets.back().unwrap().read().unwrap();
     let end_time = lock.end_time_ns - 10000;
 
     dbg!(&cache.spread_percentiles(start_time, end_time));
